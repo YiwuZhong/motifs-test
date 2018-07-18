@@ -59,6 +59,17 @@ class VG(Dataset):
 
         self.filenames = load_image_filenames(image_file)
         self.filenames = [self.filenames[i] for i in np.where(self.split_mask)[0]]
+        '''        
+        # 15 15 15
+        if self.mode == 'test':
+            txtfile = open('test_img.txt', 'w')
+            for one_dict in self.filenames:
+                txtfile.write(one_dict)
+                txtfile.write('\n')
+            txtfile.close()
+        '''
+        print("From visual_genome.py: the total number of ", self.mode, " images is")
+        print(len(self.filenames)) 
 
         self.ind_to_classes, self.ind_to_predicates = load_info(dict_file)
 
