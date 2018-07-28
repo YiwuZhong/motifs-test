@@ -50,6 +50,8 @@ class RoIAlignFunction(Function):
     def backward(self, grad_output):
         assert(self.feature_size is not None and grad_output.is_cuda)
 
+        #print("RoIAlignFunction backward running!\n")
+
         rois = self.saved_tensors[0]
 
         rois_normalized = rois.clone()

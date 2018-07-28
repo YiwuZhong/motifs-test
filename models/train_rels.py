@@ -10,8 +10,9 @@ import pandas as pd
 import time
 import os
 
-from config import ModelConfig, BOX_SCALE, IM_SCALE
+from config import ModelConfig, BOX_SCALE, IM_SCALE, FG_FRACTION, RPN_FG_FRACTION
 from torch.nn import functional as F
+from lib.fpn.box_utils import bbox_loss
 from lib.pytorch_misc import optimistic_restore, de_chunkize, clip_grad_norm
 from lib.evaluation.sg_eval import BasicSceneGraphEvaluator
 from lib.pytorch_misc import print_para
@@ -19,7 +20,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from init_logging import init_logging
 import logging
 import ipdb
-init_logging("/home/yiwuzhong/motifs/logging/" + "sgdet.log")
+
 
 
 conf = ModelConfig()
@@ -30,6 +31,8 @@ elif conf.model == 'stanford':
 else:
     raise ValueError()
 
+init_logging("/home/yiwuzhong/motifs/logging/" + conf.mode +".log")
+
 train, val, _ = VG.splits(num_val_im=conf.val_size, filter_duplicate_rels=True,
                           use_proposals=conf.use_proposals,
                           filter_non_overlap=conf.mode == 'sgdet')
@@ -38,7 +41,7 @@ train_loader, val_loader = VGDataLoader.splits(train, val, mode='rel',
                                                num_workers=conf.num_workers,
                                                num_gpus=conf.num_gpus)
 
-#ipdb.set_trace()
+# ipdb.set_trace()
 
 detector = RelModel(classes=train.ind_to_classes, rel_classes=train.ind_to_predicates,
                     num_gpus=conf.num_gpus, mode=conf.mode, require_overlap_det=True,
@@ -53,17 +56,30 @@ detector = RelModel(classes=train.ind_to_classes, rel_classes=train.ind_to_predi
                     use_tanh=conf.use_tanh,
                     limit_vision=conf.limit_vision
                     )
-
+"""
 # Freeze the detector
+# .named_parameters(): returns (string, Parameter), Tuple containing the name and parameter itself
 for n, param in detector.detector.named_parameters():
-    param.requires_grad = False
+    #print(n)
+    if n.startswith('score'):
+        param.requires_grad = False
+    elif n.startswith('bbox'):
+        param.requires_grad = False
+    if n.startswith('roi'):
+        param.requires_grad = False
+    elif n.startswith('features'):
+        param.requires_grad = False
+    else:
+        continue
+"""
 
 print(print_para(detector), flush=True)
 
 # optimizer
 def get_optim(lr):
-    # Lower the learning rate on the VGG fully connected layers by 1/10th. It's a hack, but it helps
-    # stabilize the models.
+    # Lower the learning rate on the VGG fully connected layers by 1/10th. It's a hack, but it helps stabilize the models.
+    # p.requires_grad == True if it's not Faster RCNN param; == False if it's Faster RCNN param
+    # original: add all 'roi_fmap' in Relmodel into fc_params; add all not 'roi_fmap' in Relmodel into non_fc_params; params in faster rcnn, continue
     fc_params = [p for n,p in detector.named_parameters() if n.startswith('roi_fmap') and p.requires_grad]
     non_fc_params = [p for n,p in detector.named_parameters() if not n.startswith('roi_fmap') and p.requires_grad]
     params = [{'params': fc_params, 'lr': lr / 10.0}, {'params': non_fc_params}]
@@ -85,16 +101,18 @@ ckpt = torch.load(conf.ckpt)
 if conf.ckpt.split('-')[-2].split('/')[-1] == 'vgrel':
     print("Loading EVERYTHING")
     start_epoch = ckpt['epoch']
+    #print("vgrel ckpt:", ckpt['state_dict'].keys())
 
     if not optimistic_restore(detector, ckpt['state_dict']):
         start_epoch = -1
         # optimistic_restore(detector.detector, torch.load('checkpoints/vgdet/vg-28.tar')['state_dict'])
 
-# faster rcnn and sgcls training
+# sgcls training
 else:
     start_epoch = -1
     optimistic_restore(detector.detector, ckpt['state_dict'])
-    ipdb.set_trace()
+    #print("vgdet ckpt:", ckpt['state_dict'].keys())
+
     detector.roi_fmap[1][0].weight.data.copy_(ckpt['state_dict']['roi_fmap.0.weight'])
     detector.roi_fmap[1][3].weight.data.copy_(ckpt['state_dict']['roi_fmap.3.weight'])
     detector.roi_fmap[1][0].bias.data.copy_(ckpt['state_dict']['roi_fmap.0.bias'])
@@ -147,6 +165,54 @@ def train_batch(b, verbose=False):
     """
     #ipdb.set_trace()
     result = detector[b]
+    losses = {}
+    if conf.mode == 'sgdet':
+        ############################  Detector Loss  #################################
+
+        # final classification
+        labels = result.od_obj_labels  # [4000+]
+        scores = result.od_obj_dists  # [4000+, 151]
+        od_class_loss = F.cross_entropy(scores, labels)
+
+        # final box location
+        bbox_targets = result.od_box_targets  # [4000+, 4], gt box
+        box_deltas = result.od_box_deltas  # [4000+, 151, 4], delta
+        roi_boxes = result.od_box_priors  # [4000, 4], prior box
+
+        # detector loss
+        valid_inds = (labels.data != 0).nonzero().squeeze(1)
+        fg_cnt = valid_inds.size(0)
+        bg_cnt = labels.size(0) - fg_cnt
+
+        # No gather_nd in pytorch so instead convert first 2 dims of tensor to 1d
+        box_reg_mult = 2 * (1. / FG_FRACTION) * fg_cnt / (fg_cnt + bg_cnt + 1e-4)
+        twod_inds = valid_inds * box_deltas.size(1) + labels[valid_inds].data
+
+        od_box_loss = bbox_loss(roi_boxes[valid_inds], box_deltas.view(-1, 4)[twod_inds],
+                             bbox_targets[valid_inds]) * box_reg_mult
+        
+        # RPN
+        rpn_scores = result.rpn_scores  # [1536, 2], yes/no
+        rpn_box_deltas = result.rpn_box_deltas  # [1536, 4]
+
+        train_anchor_labels = b.train_anchor_labels[:, -1]
+        train_anchors = b.train_anchors[:, :4]
+        train_anchor_targets = b.train_anchors[:, 4:]
+
+        train_valid_inds = (train_anchor_labels.data == 1).nonzero().squeeze(1)
+        rpn_class_loss = F.cross_entropy(rpn_scores, train_anchor_labels)
+
+        rpn_box_mult = 2 * (1. / RPN_FG_FRACTION) * train_valid_inds.size(0) / (train_anchor_labels.size(0) + 1e-4)
+        rpn_box_loss = bbox_loss(train_anchors[train_valid_inds],
+                                 rpn_box_deltas[train_valid_inds],
+                                 train_anchor_targets[train_valid_inds]) * rpn_box_mult
+
+        losses['rpn_class_loss'] = rpn_class_loss
+        losses['rpn_box_loss'] = rpn_box_loss
+        losses['od_class_loss'] = od_class_loss
+        losses['od_box_loss'] = od_box_loss
+
+        ############################  Detector Loss  #################################
 
     # cross_entropy(input, target): 
     # input, (#obj, 151), vector of #classes dim, which will be converted into probability (scores) by log_softmax
@@ -155,7 +221,7 @@ def train_batch(b, verbose=False):
     # rm_obj_labels.shape:[164]
     # result.rel_labels.shape:[1810, 4], [img_ind, box0_ind, box1_ind, rel_type]
     # result.rel_dists.shape:[1810, 51]
-    losses = {}
+
     losses['class_loss'] = F.cross_entropy(result.rm_obj_dists, result.rm_obj_labels)
     losses['rel_loss'] = F.cross_entropy(result.rel_dists, result.rel_labels[:, -1])
     loss = sum(losses.values())
@@ -163,7 +229,7 @@ def train_batch(b, verbose=False):
     optimizer.zero_grad()
     loss.backward()
     clip_grad_norm(
-        [(n, p) for n, p in detector.named_parameters() if p.grad is not None],
+        [(n, p) for n, p in detector.named_parameters() if p.grad is not None], # p.grad is None when param don't backward propagate
         max_norm=conf.clip, verbose=verbose, clip=True)
     losses['total'] = loss
     optimizer.step()

@@ -48,17 +48,43 @@ class VG(Dataset):
         self.roidb_file = roidb_file
         self.dict_file = dict_file
         self.image_file = image_file
+
         self.filter_non_overlap = filter_non_overlap
         self.filter_duplicate_rels = filter_duplicate_rels and self.mode == 'train'
-
+        
+        # (ndarray, list, list, list)
         self.split_mask, self.gt_boxes, self.gt_classes, self.relationships = load_graphs(
             self.roidb_file, self.mode, num_im, num_val_im=num_val_im,
             filter_empty_rels=filter_empty_rels,
             filter_non_overlap=self.filter_non_overlap and self.is_train,
         )
 
+        # list
         self.filenames = load_image_filenames(image_file)
+        # get the train list if 'train'; get the 'test' list if 'test'; get the 'val' list if 'val'
         self.filenames = [self.filenames[i] for i in np.where(self.split_mask)[0]]
+        
+        if self.mode == 'train':
+            num_for_train = 5000
+            self.gt_boxes = self.gt_boxes[:num_for_train]
+            self.gt_classes = self.gt_classes[:num_for_train]
+            self.relationships = self.relationships[:num_for_train]
+            self.filenames = self.filenames[:num_for_train]
+        elif self.mode == 'val':
+            num_for_val = 500
+            self.gt_boxes = self.gt_boxes[:num_for_val]
+            self.gt_classes = self.gt_classes[:num_for_val]
+            self.relationships = self.relationships[:num_for_val]
+            self.filenames = self.filenames[:num_for_val]
+        elif self.mode == 'test':
+            num_for_test = 100
+            self.gt_boxes = self.gt_boxes[:num_for_test]
+            self.gt_classes = self.gt_classes[:num_for_test]
+            self.relationships = self.relationships[:num_for_test]
+            self.filenames = self.filenames[:num_for_test]
+        else:
+            pass
+
         '''        
         # 15 15 15
         if self.mode == 'test':
@@ -72,7 +98,8 @@ class VG(Dataset):
         print(len(self.filenames)) 
 
         self.ind_to_classes, self.ind_to_predicates = load_info(dict_file)
-
+        
+        # whether use RPN proposals of Xu et als; will correspond to self.filenames
         if use_proposals:
             print("Loading proposals", flush=True)
             p_h5 = h5py.File(PROPOSAL_FN, 'r')

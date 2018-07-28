@@ -15,16 +15,17 @@ from config import DATA_PATH
 
 
 def obj_edge_vectors(names, wv_type='glove.6B', wv_dir=DATA_PATH, wv_dim=300):
+    # wv_dict is dict with length 400000; wv_arr is array shaped (400000, 200); wv_size = 200
     wv_dict, wv_arr, wv_size = load_word_vectors(wv_dir, wv_type, wv_dim)
 
-    vectors = torch.Tensor(len(names), wv_dim)
+    vectors = torch.Tensor(len(names), wv_dim)  # shape [151,200]
     vectors.normal_(0,1)
 
     for i, token in enumerate(names):
         wv_index = wv_dict.get(token, None)
         if wv_index is not None:
             vectors[i] = wv_arr[wv_index]
-        else:
+        else
             # Try the longest word (hopefully won't be a preposition
             lw_token = sorted(token.split(' '), key=lambda x: len(x), reverse=True)[0]
             print("{} -> {} ".format(token, lw_token))

@@ -93,9 +93,10 @@ class LinearizedContext(nn.Module):
         self.order = order
 
         # EMBEDDINGS
-        embed_vecs = obj_edge_vectors(self.classes, wv_dim=self.embed_dim)  # [151.200]; self.classes is gt classes list 1~150
+        # self.classes: word list, len is 151; 
+        embed_vecs = obj_edge_vectors(self.classes, wv_dim=self.embed_dim)  # [151.200]; self.classes is gt words list 1~150
         self.obj_embed = nn.Embedding(self.num_classes, self.embed_dim)  # return container [dim_input, embed_dim] array
-        self.obj_embed.weight.data = embed_vecs.clone()  # [151, 200] weight
+        self.obj_embed.weight.data = embed_vecs.clone()  # equals embed_vecs, [151, 200]
 
         self.obj_embed2 = nn.Embedding(self.num_classes, self.embed_dim)
         self.obj_embed2.weight.data = embed_vecs.clone()
@@ -178,9 +179,10 @@ class LinearizedContext(nn.Module):
         :return: edge_ctx: [num_obj, #feats] For later!
         """
 
-        # Only use hard embeddings
+        # Only use hard embeddings [#boxes, 200]
         obj_embed2 = self.obj_embed2(obj_preds)
         # obj_embed3 = F.softmax(obj_dists, dim=1) @ self.obj_embed3.weight
+        # inp_feasts: [#boxes, if 'passinto' == true: obj_ctx + obj_fmaps (512+4096); else obj_ctx (512) dim]
         inp_feats = torch.cat((obj_embed2, obj_feats), 1)
 
         # Sort by the confidence of the maximum detection.
@@ -192,29 +194,35 @@ class LinearizedContext(nn.Module):
         edge_reps = self.edge_ctx_rnn(edge_input_packed)[0][0]
 
         # now we're good! unperm
+        # edg_ctx: [#boxes, 512]
         edge_ctx = edge_reps[inv_perm]
         return edge_ctx
 
     def obj_ctx(self, obj_feats, obj_dists, im_inds, obj_labels=None, box_priors=None, boxes_per_cls=None):
         """
         Object context and object classification.
-        :param obj_feats: [num_obj, img_dim + object embedding0 dim]
-        :param obj_dists: [num_obj, #classes]
+        :param obj_feats: obj_pre_rep, [num_obj, 4096+200+128]
+        :param obj_dists: result.rm_obj_dists.detach(), [num_obj, 151]
         :param im_inds: [num_obj] the indices of the images
-        :param obj_labels: [num_obj] the GT labels of the image
+        :param obj_labels: od_obj_labels, [num_obj] the GT labels of the image 
         :param boxes: [num_obj, 4] boxes. We'll use this for NMS
         :return: obj_dists: [num_obj, #classes] new probability distribution.
                  obj_preds: argmax of that distribution.
                  obj_final_ctx: [num_obj, #feats] For later!
         """
-        # Sort by the confidence of the maximum detection.
+
+        # Encode in order
+        # Sort by the confidence of the maximum detection; [384.151]->[384,151]->[384,150]->[384,2], (scores,index)
         confidence = F.softmax(obj_dists, dim=1).data[:, 1:].max(1)[0]
+        # sort rois(boxes) according to some order
         perm, inv_perm, ls_transposed = self.sort_rois(im_inds.data, confidence, box_priors)
         # Pass object features, sorted by score, into the encoder LSTM
-        obj_inp_rep = obj_feats[perm].contiguous()
+        obj_inp_rep = obj_feats[perm].contiguous()  # make cache/memory contiguous
         input_packed = PackedSequence(obj_inp_rep, ls_transposed)
-
+        # encoder_rep: [#boxes, 512]
         encoder_rep = self.obj_ctx_rnn(input_packed)[0][0]
+
+
         # Decode in order
         if self.mode != 'predcls':
             decoder_inp = PackedSequence(torch.cat((obj_inp_rep, encoder_rep), 1) if self.pass_in_obj_feats_to_decoder else encoder_rep,
@@ -230,6 +238,7 @@ class LinearizedContext(nn.Module):
             assert obj_labels is not None
             obj_preds = obj_labels
             obj_dists = Variable(to_onehot(obj_preds.data, self.num_classes))
+
         encoder_rep = encoder_rep[inv_perm]
 
         return obj_dists, obj_preds, encoder_rep
@@ -237,22 +246,34 @@ class LinearizedContext(nn.Module):
     def forward(self, obj_fmaps, obj_logits, im_inds, obj_labels=None, box_priors=None, boxes_per_cls=None):
         """
         Forward pass through the object and edge context
-        :param obj_priors:
-        :param obj_fmaps:
+        :param obj_priors: from faster rcnn output boxes
+        :param obj_fmaps: 4096-dim roi feature maps
+        :param obj_logits: result.rm_obj_dists.detach()
         :param im_inds:
-        :param obj_labels:
+        :param obj_labels: od_obj_labels, gt
         :param boxes:
-        :return:
-        """
-        # obj_embed is [#boxex, 200] word embedding from glove 
-        obj_embed = F.softmax(obj_logits, dim=1) @ self.obj_embed.weight
-        # center_size returns boxes as (center_x, center_y, width, height); After Sequential processing, get pos_embed
-        pos_embed = self.pos_embed(Variable(center_size(box_priors)))  
-        obj_pre_rep = torch.cat((obj_fmaps, obj_embed, pos_embed), 1)
+        :return: obj_dists2: [#boxes, 151], new score for boxes
+                 obj_preds: [#boxes], prediction/class value
+                 edge_ctx: [#boxes, 512], new features for boxes
 
+        """
+
+        # Object State:
+        # obj_embed: [#boxes, 200], and self.obj_embed.weight are both Variable
+        # obj_logits: result.rm_obj_dists.detach(), [#boxes, 151], detector scores before softmax
+        obj_embed = F.softmax(obj_logits, dim=1) @ self.obj_embed.weight
+        # center_size returns boxes as (center_x, center_y, width, height)
+        # pos_embed: [#boxes, 128], Variable, from boxes after Sequential processing
+        pos_embed = self.pos_embed(Variable(center_size(box_priors)))
+        # obj_pre_rep: [#boxes, 4424], Variable
+        obj_pre_rep = torch.cat((obj_fmaps, obj_embed, pos_embed), 1)
+        
         if self.nl_obj > 0:
+            # obj_dists2: [#boxes, 151], new score for box
+            # obj_preds: [#boxes], prediction/class value
+            # obj_ctx: [#boxes, 512], new features vector for box
             obj_dists2, obj_preds, obj_ctx = self.obj_ctx(
-                obj_pre_rep,
+                obj_fmaps,  #obj_pre_rep,
                 obj_logits,
                 im_inds,
                 obj_labels,
@@ -286,8 +307,10 @@ class LinearizedContext(nn.Module):
                 obj_preds = obj_labels if obj_labels is not None else obj_dists2[:,1:].max(1)[1] + 1
             obj_ctx = obj_pre_rep
 
+        # Edge State:
         edge_ctx = None
         if self.nl_edge > 0:
+            # edge_ctx: [#boxes, 512]
             edge_ctx = self.edge_ctx(
                 torch.cat((obj_fmaps, obj_ctx), 1) if self.pass_in_obj_feats_to_edge else obj_ctx,
                 obj_dists=obj_dists2.detach(),  # Was previously obj_logits.
@@ -448,7 +471,7 @@ class RelModel(nn.Module):
         """
         feature_pool = RoIAlignFunction(self.pooling_size, self.pooling_size, spatial_scale=1 / 16)(
             features, rois)
-        return self.roi_fmap_obj(feature_pool.view(rois.size(0), -1))
+        return self.roi_fmap_obj(feature_pool.view(rois.size(0), -1))  # vgg.classifier
 
     def forward(self, x, im_sizes, image_offset,
                 gt_boxes=None, gt_classes=None, gt_rels=None, proposals=None, train_anchor_inds=None,
@@ -480,39 +503,37 @@ class RelModel(nn.Module):
             return ValueError("heck")
 
         im_inds = result.im_inds - image_offset
-        boxes = result.rm_box_priors   # [#box/obj, 4]
+        boxes = result.rm_box_priors.detach()   # [#boxes, 4]; where narrow error comes from, should .detach()
 
         if self.training and result.rel_labels is None:
-            assert self.mode == 'sgdet'
+            assert self.mode == 'sgdet' # sgcls's result.rel_labels is gt and not None
             result.rel_labels = rel_assignments(im_inds.data, boxes.data, result.rm_obj_labels.data,
                                                 gt_boxes.data, gt_classes.data, gt_rels.data,
                                                 image_offset, filter_non_overlap=True,
                                                 num_sample_per_gt=1)
 
         rel_inds = self.get_rel_inds(result.rel_labels, im_inds, boxes)
-
+        # rois: [#boxes, 5]
         rois = torch.cat((im_inds[:, None].float(), boxes), 1)
-
-        # result.obj_fmap: [#box/obj, 4096]
-        result.obj_fmap = self.obj_feature_map(result.fmap.detach(), rois) # detach: prevent backforward flowing
-        
-        #print("rm_box_priors shape is ", result.rm_box_priors.shape)
-        #print("obj_fmap shape is ", result.obj_fmap.shape)
-        #print("rm_obj_dists shape is ", result.rm_obj_dists.shape)
-        #import ipdb
-        #ipdb.set_trace()
+        # result.rm_obj_fmap: [384, 4096]
+        #result.rm_obj_fmap = self.obj_feature_map(result.fmap.detach(), rois) # detach: prevent backforward flowing
+        result.rm_obj_fmap = self.obj_feature_map(result.fmap, rois.detach()) # detach: prevent backforward flowing
 
 
         # BiLSTM
-        result.rm_obj_dists, result.obj_preds, edge_ctx = self.context(
-            result.obj_fmap,
-            result.rm_obj_dists.detach(),  # Prevent gradients from flowing back into score_fc from elsewhere
+        result.rm_obj_dists, result.rm_obj_preds, edge_ctx = self.context(
+            result.rm_obj_fmap,   # has been detached above
+            # rm_obj_dists: [#boxes, 151]; Prevent gradients from flowing back into score_fc from elsewhere
+            result.rm_obj_dists.detach(),  # .detach:Returns a new Variable, detached from the current graph
             im_inds, result.rm_obj_labels if self.training or self.mode == 'predcls' else None,
-            boxes.data, result.boxes_all)
-
+            boxes.data, result.boxes_all.detach() if self.mode == 'sgdet' else result.boxes_all)
+        
+        # Post Processing
+        # nl_egde <= 0
         if edge_ctx is None:
-            edge_rep = self.post_emb(result.obj_preds)
-        else:
+            edge_rep = self.post_emb(result.rm_obj_preds)
+        # nl_edge > 0
+        else: 
             edge_rep = self.post_lstm(edge_ctx)
 
         # Split into subject and object representations
@@ -538,14 +559,14 @@ class RelModel(nn.Module):
 
         if self.use_bias:
             result.rel_dists = result.rel_dists + self.freq_bias.index_with_labels(torch.stack((
-                result.obj_preds[rel_inds[:, 1]],
-                result.obj_preds[rel_inds[:, 2]],
+                result.rm_obj_preds[rel_inds[:, 1]],
+                result.rm_obj_preds[rel_inds[:, 2]],
             ), 1))
 
         if self.training:
             return result
 
-        twod_inds = arange(result.obj_preds.data) * self.num_classes + result.obj_preds.data
+        twod_inds = arange(result.rm_obj_preds.data) * self.num_classes + result.rm_obj_preds.data
         result.obj_scores = F.softmax(result.rm_obj_dists, dim=1).view(-1)[twod_inds]
 
         # Bbox regression
@@ -557,7 +578,7 @@ class RelModel(nn.Module):
 
         rel_rep = F.softmax(result.rel_dists, dim=1)
         return filter_dets(bboxes, result.obj_scores,
-                           result.obj_preds, rel_inds[:, 1:], rel_rep)
+                           result.rm_obj_preds, rel_inds[:, 1:], rel_rep)
 
     def __getitem__(self, batch):
         """ Hack to do multi-GPU training"""
