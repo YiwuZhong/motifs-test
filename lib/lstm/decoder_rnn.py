@@ -205,9 +205,11 @@ class DecoderRNN(torch.nn.Module):
             if self.training:
                 labels_to_embed = labels[start_ind:end_ind].clone()
                 # Whenever labels are 0 set input to be our max prediction
-                nonzero_pred = pred_dist[:, 1:].max(1)[1] + 1
+                nonzero_pred = pred_dist[:, 1:].max(1)[1] + 1  # +1: because the index is in 150-d but truth is 151-d
                 is_bg = (labels_to_embed.data == 0).nonzero()
                 if is_bg.dim() > 0:
+                    # the 0 in labels is because they overlap with gt box lower than threshold, so assigned 0
+                    # but for these entry, we should give them the maximum value within 151-d dists
                     labels_to_embed[is_bg.squeeze(1)] = nonzero_pred[is_bg.squeeze(1)]
                 out_commitments.append(labels_to_embed)
                 previous_embed = self.obj_embed(labels_to_embed+1)

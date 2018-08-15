@@ -148,7 +148,8 @@ def train_epoch(epoch_num):
     start = time.time()
     for b, batch in enumerate(train_loader):
         tr.append(train_batch(batch, verbose=b % (conf.print_interval*10) == 0)) #b == 0))
-
+        print("batch/n")
+        """
         if b % conf.print_interval == 0 and b >= conf.print_interval:
             mn = pd.concat(tr[-conf.print_interval:], axis=1).mean(1)
             time_per_batch = (time.time() - start) / conf.print_interval
@@ -157,6 +158,9 @@ def train_epoch(epoch_num):
             logging.info(mn)
             print('-----------', flush=True)
             start = time.time()
+        """
+    upperbound = np.mean(np.array(tr))
+    print("!!! upper bound is ", upperbound)
     return pd.concat(tr, axis=1)
 
 
@@ -181,6 +185,11 @@ def train_batch(b, verbose=False):
     """
     #ipdb.set_trace()
     result = detector[b]
+    print(result)
+    upperbound =  np.mean(np.array(result))
+
+    return upperbound
+    '''
     losses = {}
     if conf.mode == 'sgdet':
         ############################  Detector Loss  #################################
@@ -267,6 +276,8 @@ def train_batch(b, verbose=False):
     optimizer.step()
     res = pd.Series({x: y.data[0] for x, y in losses.items()})
     return res
+    '''
+
 
 
 def val_epoch():

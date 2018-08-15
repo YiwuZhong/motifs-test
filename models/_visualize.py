@@ -18,6 +18,7 @@ from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 import os
 from functools import reduce
+import ipdb
 
 conf = ModelConfig()
 #train, val, test = VG.splits(num_val_im=conf.val_size)
@@ -26,7 +27,7 @@ train, val, test = VG.splits(num_val_im=conf.val_size, filter_duplicate_rels=Tru
                           filter_non_overlap=conf.mode == 'sgdet')
 # use validation set
 #if conf.test:
-   # val = test
+    #val = test
 
 train_loader, val_loader = VGDataLoader.splits(train, val, mode='rel',
                                                batch_size=conf.batch_size,
@@ -137,20 +138,20 @@ def val_batch(batch_num, b, evaluator, thrs=(20, 50, 100)):
     boxes_i, objs_i, obj_scores_i, rels_i, pred_scores_i = det_res
 
     gt_entry = {
-        'gt_classes': val.gt_classes[batch_num].copy(),
-        'gt_relations': val.relationships[batch_num].copy(),
-        'gt_boxes': val.gt_boxes[batch_num].copy(),
+        'gt_classes': val.gt_classes[batch_num].copy(),  # (23,)
+        'gt_relations': val.relationships[batch_num].copy(),  # (29, 3)
+        'gt_boxes': val.gt_boxes[batch_num].copy(),  # (23, 4)
     }
     # gt_entry = {'gt_classes': gtc[i], 'gt_relations': gtr[i], 'gt_boxes': gtb[i]}
     assert np.all(objs_i[rels_i[:, 0]] > 0) and np.all(objs_i[rels_i[:, 1]] > 0)
     # assert np.all(rels_i[:, 2] > 0)
 
     pred_entry = {
-        'pred_boxes': boxes_i * BOX_SCALE / IM_SCALE,
-        'pred_classes': objs_i,
-        'pred_rel_inds': rels_i,
-        'obj_scores': obj_scores_i,
-        'rel_scores': pred_scores_i,
+        'pred_boxes': boxes_i * BOX_SCALE / IM_SCALE,  # (64, 4)
+        'pred_classes': objs_i,  # (64,)
+        'pred_rel_inds': rels_i,  # (1202, 2)
+        'obj_scores': obj_scores_i,  # (64,)
+        'rel_scores': pred_scores_i,  # (1202, 51)
     }
 
     # pred_5ples: (num_rel, 5), (id0, id1, cls0, cls1, rel)
@@ -177,7 +178,7 @@ def val_batch(batch_num, b, evaluator, thrs=(20, 50, 100)):
     missededges = {}
     badedges = {}
 
-    if val.filenames[batch_num].startswith('2343676'):
+    if val.filenames[batch_num].startswith('625'):
         import ipdb
         ipdb.set_trace()
 
@@ -200,7 +201,7 @@ def val_batch(batch_num, b, evaluator, thrs=(20, 50, 100)):
         return gt_ind2name[gt_ind]
 
     ###############################################################################################################
-    # divide gt_5ples and pred_5ples into 4 parts: edges, missededges, badedges and the rest edges
+    # divide gt_5ples and pred_5ples into 4 parts: edges, missededges, badedges (50-good edges)
     # 5ples: (# gt/pred rel, 5), (id0, id1, cls0, cls1, rel); id0, id1 are the row index of "gt/pred_classes" array
     ###############################################################################################################
     # 1. edges
@@ -245,12 +246,12 @@ def val_batch(batch_num, b, evaluator, thrs=(20, 50, 100)):
            # if fiveple[1] in pred_ind2name:
                # badedges[(pred_ind2name[fiveple[0]], pred_ind2name[fiveple[1]])] = train.ind_to_predicates[fiveple[4]]
 
-
-
     theimg = load_unscaled(val.filenames[batch_num])
     draw1 = ImageDraw.Draw(theimg)
     theimg2 = theimg.copy()
     draw2 = ImageDraw.Draw(theimg2)
+    theimg3 = theimg.copy()
+    draw3 = ImageDraw.Draw(theimg3)    
 
     # using pred/gt_ind2name to fix the names of different instances with the same classes
     # gt/pred_ind is the keys: id0, id1 of 5ples
@@ -263,6 +264,15 @@ def val_batch(batch_num, b, evaluator, thrs=(20, 50, 100)):
         draw2 = draw_box(draw2, gt_entry['gt_boxes'][gt_ind],
                          cls_ind=gt_entry['gt_classes'][gt_ind],
                          text_str=gt_ind2name[gt_ind])
+    #import ipdb
+    #ipdb.set_trace()
+    for pred_64 in range(pred_entry['pred_boxes'].shape[0]):
+        if pred_64 not in pred_ind2name: # pred_ind2name's key is the index of pred_boxes (64)
+            class_score_text = train.ind_to_classes[pred_entry['pred_classes'][pred_64]] + \
+                            '--' + str(pred_entry['obj_scores'][pred_64])
+            draw3 = draw_box(draw3, pred_entry['pred_boxes'][pred_64,:],
+                         cls_ind= pred_entry['pred_classes'][pred_64],
+                         text_str=class_score_text)
         
     # "-60" means recall is 60
     recall = int(100 * len(reduce(np.union1d, pred_to_gt)) / gt_entry['gt_relations'].shape[0])
@@ -274,8 +284,9 @@ def val_batch(batch_num, b, evaluator, thrs=(20, 50, 100)):
         os.mkdir(pathname)
     theimg.save(os.path.join(pathname, id + '-deteceted.jpg'), quality=100, subsampling=0)
     theimg2.save(os.path.join(pathname, id + '-missed.jpg'), quality=100, subsampling=0)
+    theimg3.save(os.path.join(pathname, id + '-rcnnbox.jpg'), quality=100, subsampling=0)
     
-    import ipdb
+    #import ipdb
     #ipdb.set_trace()
     with open(os.path.join(pathname, id + '.txt'), 'w') as f:
         f.write('Good: gt and detected \n')
@@ -287,5 +298,10 @@ def val_batch(batch_num, b, evaluator, thrs=(20, 50, 100)):
         f.write('\nBad: not gt but detected \n')
         for (o1, o2), p in badedges.items():
             f.write('{} - {} - {}\n'.format(o1, p, o2))
+
+    with open(os.path.join(pathname, id + '-box.txt'), 'w') as bb:
+        bb.write('Detected Boxes from Faster RCNN')
+        for bbi in range(pred_entry['pred_classes'].shape[0]):
+            bb.write('{}: {}\n'.format(train.ind_to_classes[pred_entry['pred_classes'][bbi]], pred_entry['obj_scores'][bbi]))
 
 mAp = val_epoch()

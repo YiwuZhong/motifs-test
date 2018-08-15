@@ -56,6 +56,9 @@ class BasicSceneGraphEvaluator:
         print('======================' + self.mode + '============================')
         for k, v in self.result_dict[self.mode + '_recall'].items():
             print('R@%i: %f' % (k, np.mean(v)))
+        logging.info('======================' + self.mode + '============================')
+        for k, v in self.result_dict[self.mode + '_recall'].items():
+            logging.info('R@%i: %f' % (k, np.mean(v)))
 
 
 def eval_relation_recall(sg_entry,

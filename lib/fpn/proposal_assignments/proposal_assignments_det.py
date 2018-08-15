@@ -108,7 +108,7 @@ def _sel_inds(max_overlaps, fg_thresh=0.5, fg_rois_per_image=128, rois_per_image
     # randomly select #min(128, #fg_inds) foreground regions 
     if fg_inds.size > 0:
         fg_inds = npr.choice(fg_inds, size=fg_rois_per_this_image, replace=False)
-
+    #print("fg is ", fg_rois_per_this_image)
 
     #Backgrounds:
     # Select background RoIs as those within [BG_THRESH_LO, BG_THRESH_HI)
@@ -121,6 +121,6 @@ def _sel_inds(max_overlaps, fg_thresh=0.5, fg_rois_per_image=128, rois_per_image
     # Sample background regions without replacement
     if bg_inds.size > 0:
         bg_inds = npr.choice(bg_inds, size=bg_rois_per_this_image, replace=False)
-
+    #print("bg is ", bg_rois_per_this_image, "\n")
     return np.append(fg_inds, bg_inds), fg_rois_per_this_image
 

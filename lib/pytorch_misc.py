@@ -11,6 +11,7 @@ import dill as pkl
 from itertools import tee
 from torch import nn
 
+
 def optimistic_restore(network, state_dict):
     mismatch = False
     own_state = network.state_dict()
@@ -102,7 +103,7 @@ def to_variable(f):
 
 def arange(base_tensor, n=None):
     new_size = base_tensor.size(0) if n is None else n
-    new_vec = base_tensor.new(new_size).long()
+    new_vec = base_tensor.new(new_size).long() # same size; new_vec data equals its index
     torch.arange(0, new_size, out=new_vec)
     return new_vec
 
@@ -254,22 +255,25 @@ def np_to_variable(x, is_cuda=True, dtype=torch.FloatTensor):
 
 def gather_nd(x, index):
     """
-
-    :param x: n dimensional tensor [x0, x1, x2, ... x{n-1}, dim]
-    :param index: [num, n-1] where each row contains the indices we'll use
+    20, 37, 37 and 6 are like 2, 8, 10, 16 in the binary, decimal, octanay and hexadecimal system
+    index provides corresponding base like [p, z, y, x]
+    final location is: x + 20*y + 20*37*z + 20*37*37*p
+    and extract those location rows in x.view(-1, dim) ([6*37*37*20,6])
+    :param x:  ex: [6,37,37,20,6]; n dimensional tensor [x0, x1, x2, ... x{n-1}, dim];
+    :param index: ex:[1536,4]; [num, n-1] where each row contains the indices we'll use; 
     :return: [num, dim]
     """
-    nd = x.dim() - 1
+    nd = x.dim() - 1  # 4
     assert nd > 0
     assert index.dim() == 2
     assert index.size(1) == nd
-    dim = x.size(-1)
+    dim = x.size(-1)  # 6, the last element of x
 
-    sel_inds = index[:,nd-1].clone()
-    mult_factor = x.size(nd-1)
-    for col in range(nd-2, -1, -1): # [n-2, n-3, ..., 1, 0]
+    sel_inds = index[:,nd-1].clone()  # the 4th column of index
+    mult_factor = x.size(nd-1)  # 20
+    for col in range(nd-2, -1, -1): # [n-2, n-3, ..., 1, 0], n=4
         sel_inds += index[:,col] * mult_factor
-        mult_factor *= x.size(col)
+        mult_factor *= x.size(col) # x.size(col)=37, 37, 6
 
     grouped = x.view(-1, dim)[sel_inds]
     return grouped
@@ -279,7 +283,7 @@ def enumerate_by_image(im_inds):
     im_inds_np = im_inds.cpu().numpy()
     initial_ind = int(im_inds_np[0])
     s = 0
-    for i, val in enumerate(im_inds_np):
+    for i, val in enumerate(im_inds_np): # index i, value
         if val != initial_ind:
             yield initial_ind, s, i
             initial_ind = int(val)
@@ -458,3 +462,4 @@ def update_lr(optimizer, lr=1e-4):
     print("------ Learning rate -> {}".format(lr))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+

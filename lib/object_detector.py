@@ -17,6 +17,7 @@ from lib.pytorch_misc import enumerate_by_image, gather_nd, diagonal_inds, Flatt
 from torchvision.models.vgg import vgg16
 from torchvision.models.resnet import resnet101
 from torch.nn.parallel._functions import Gather
+import ipdb
 
 
 class Result(object):
@@ -29,7 +30,8 @@ class Result(object):
                  od_box_targets=None, rm_box_targets=None, od_box_priors=None, rm_box_priors=None,
                  boxes_assigned=None, boxes_all=None, od_obj_labels=None, rm_obj_labels=None,
                  rpn_scores=None, rpn_box_deltas=None, rel_labels=None,
-                 im_inds=None, fmap=None, rel_dists=None, rel_inds=None, rel_rep=None):
+                 im_inds=None, fmap=None, rel_dists=None, rel_inds=None, rel_rep=None,
+                 lstm_box_deltas=None, distance=None, anchor=None, pos=None, neg=None, ratio=None):
         self.__dict__.update(locals())
         del self.__dict__['self']
 
@@ -150,7 +152,7 @@ class ObjectDetector(nn.Module):
         :param train_anchor_inds:
         :return:
         """
-        # rpn_feats:[6,37,37,20,6]; RPN_Head.init & forward
+        # rpn_feats:[6,37,37,20,6], scores+deltas of all anchors; RPN_Head.init & forward
         rpn_feats = self.rpn_head(fmap)
         # roi_proposals: pre_nms_topn=6000, post_nms_topn=1000, thres=0.7, filter boxes from 16w to 4275 (6 images)
         # get the first max(6000, #boxes) boxes per img, then apply nms, get max(1000, #boxes) per img
@@ -160,6 +162,7 @@ class ObjectDetector(nn.Module):
             pre_nms_topn=12000 if self.training and self.mode == 'rpntrain' else 6000,
             post_nms_topn=2000 if self.training and self.mode == 'rpntrain' else 1000,
         )
+        #ipdb.set_trace()
         if self.training:
             if gt_boxes is None or gt_classes is None or train_anchor_inds is None:
                 raise ValueError(
@@ -175,20 +178,21 @@ class ObjectDetector(nn.Module):
             # sgdet/refinerels
             if self.mode == 'refinerels':
                 # NOTE: If we're doing this during training, we need to assign labels here.
+                #ipdb.set_trace()
                 pred_to_gtbox = bbox_overlaps(rois[:,1:], gt_boxes.data)  # [4000+, #gtboxes]
                 im_inds = (rois[:, 0] + image_offset).long()  # [4000+]
                 pred_to_gtbox[im_inds[:, None] != gt_classes.data[None, :, 0]] = 0.0 # gt_classes, (im_inds, class); match the image index
-                
+
                 max_overlaps, argmax_overlaps = pred_to_gtbox.max(1)
-                # gt labels assignment
+                # gt labels assignment； gt_classes: [#gtbox,2]
                 labels = gt_classes[:, 1][argmax_overlaps]
-                labels[max_overlaps < 0.5] = 0  # bad boxes
+                labels[max_overlaps < 0.5] = 0  # bad boxes; invalid labels
                 # gt boxes assignment
                 bbox_targets = gt_boxes[argmax_overlaps, :]
                 tem = max_overlaps.view(max_overlaps.size()[0], 1)
                 bbox_targets.data[torch.cat((tem,tem,tem,tem), 1)<0.5] = 1  # arbitrary value
-
-                all_rois = Variable(rois)
+                # rois become not Tensor, unlike 'rpntrain' and 'gtbox'
+                all_rois = Variable(rois) 
                 # Potentially you could add in GT rois if none match
                 # is_match = (bbox_overlaps(rois[:,1:].contiguous(), gt_boxes.data) > 0.5).long()
                 # gt_not_matched = (is_match.sum(0) == 0).nonzero()
@@ -312,7 +316,7 @@ class ObjectDetector(nn.Module):
                                   be used to compute the training loss. Each (img_ind, fpn_idx)
         :return: If train:
         """
-        # fmap： image feature map, [batch_size=6, dim=512, IM_SIZE/k=37, IM_SIZE/k=37]
+        # fmap: image feature map, [batch_size=6, dim=512, IM_SIZE/k=37, IM_SIZE/k=37]
         fmap = self.feature_map(x)
 
         # Get boxes from RPN
@@ -331,15 +335,16 @@ class ObjectDetector(nn.Module):
         #obj_fmap = self.obj_feature_map(fmap, rois if self.mode != 'refinerels' else rois.detach())
         od_obj_fmap = self.obj_feature_map(fmap, rois if self.mode != 'refinerels' else rois.detach())
         od_obj_dists = self.score_fc(od_obj_fmap)
-        od_box_deltas = self.bbox_fc(od_obj_fmap).view(
-            -1, len(self.classes), 4) if self.mode != 'gtbox' else None
+        od_box_deltas = self.bbox_fc(od_obj_fmap).view(-1, len(self.classes), 4) if self.mode != 'gtbox' else None
         # od_box_priors: [#rois, 4]
         od_box_priors = rois[:, 1:] if self.mode != 'refinerels' else rois[:,1:].detach()
 
         # sgdet/refinerels training; proposals (from #rois to #boxes whichi is fed into BiLSTM)
         if (not self.training and not self.mode == 'gtbox') or self.mode in ('proposals', 'refinerels'):
             # nms_inds, scores, preds, imgs: [384]
-            # nms_boxes_assign: [384, 4];  nms_boxes: [384, 151, 4]
+            # nms_boxes: [384, 151, 4], box pred for all class
+            # nms_boxes_assign: [384, 4], box pred for label;  
+            # all are incorporated the box deltas except nms_boxes[:,0]
             nms_inds, nms_scores, nms_preds, nms_boxes_assign, nms_boxes, nms_imgs = self.nms_boxes(
                 od_obj_dists,
                 rois,
@@ -349,16 +354,24 @@ class ObjectDetector(nn.Module):
             obj_dists = od_obj_dists[nms_inds]  # [#boxes=384, 151]
             #obj_fmap = obj_fmap[nms_inds]  # [#boxes=384, 4096]
             box_deltas = od_box_deltas[nms_inds]  # [#boxes=384, 151, 4]
-            box_priors = nms_boxes[:, 0]  # [#boxes=384, 4]
+            box_priors = nms_boxes[:, 0]  # [#boxes=384, 4], rois[nms_inds]
             
             # original: if (not self.training and not self.mode == 'gtbox'):
             # when train sgdet, self.training is True and self.mode=='refinerels'
             if (self.training and not self.mode == 'gtbox'):
                 # NOTE: If we're doing this during training, we need to assign labels here.
+                rm_obj_labels = obj_labels[nms_inds]
+                rm_bbox_targets = bbox_targets[nms_inds]
+                """
+                oinds = torch.from_numpy(np.setdiff1d(range(od_obj_dists.size(0)), nms_inds)).long().cuda()
+                print("\n all is", F.cross_entropy(od_obj_dists, obj_labels))
+                print("nms is", F.cross_entropy(od_obj_dists[nms_inds], obj_labels[nms_inds]))
+                print("other is", F.cross_entropy(od_obj_dists[oinds], obj_labels[oinds]))
+                """
+                """
                 pred_to_gtbox = bbox_overlaps(box_priors, gt_boxes).data  # [384, #gtboxes]
                 # im_inds.data[:,None]: become [384,1] from [384]; gt_classes[None, :, 0]: become [1, #gt] from [#gt, 2]; 
                 pred_to_gtbox[im_inds.data[:, None] != gt_classes.data[None, :, 0]] = 0.0 
-                
                 max_overlaps, argmax_overlaps = pred_to_gtbox.max(1)
                 # gt labels assignment
                 rm_obj_labels = gt_classes[:, 1][argmax_overlaps]
@@ -367,6 +380,9 @@ class ObjectDetector(nn.Module):
                 rm_bbox_targets = gt_boxes[argmax_overlaps, :]
                 tem = max_overlaps.view(max_overlaps.size()[0], 1)
                 rm_bbox_targets.data[torch.cat((tem,tem,tem,tem), 1)<0.5] = 1  # arbitrary value
+                print(rm_obj_labels.data.equal(obj_labels[nms_inds].data)) == True
+                print(rm_bbox_targets.data.equal(bbox_targets[nms_inds].data)) == True
+                """
             else:
                 rm_obj_labels = None
                 rm_bbox_targets = None
@@ -388,15 +404,15 @@ class ObjectDetector(nn.Module):
             rpn_box_deltas=rpn_box_deltas,  # [#rpnboxes, 4]
 
             od_obj_dists=od_obj_dists,  # [#rois, 151]
-            od_obj_labels=obj_labels,  # when sgdet, [#rois]; when rpntraining, [1536]
-            od_box_deltas=od_box_deltas,  # [#rois, 151, 4]
+            od_obj_labels=obj_labels,  # when sgdet, [#rois]; when rpntraining, [1536]; obtained by overlap with gt
+            od_box_deltas=od_box_deltas,  # [#rois, 151, 4], (tx, ty, th, tw), already normalization tx = (x1 - x2) / w2, tw = log( w1 / w2 )
             od_box_priors=od_box_priors,  # [#rois, 4]
             od_box_targets=bbox_targets,  # when sgdet, [#rois,4]; when rpntraining, [1536, 4]
             # all param with #boxes cannot be used for faster rcnn training!
             rm_obj_dists=obj_dists,  # [#boxes, 151]
             rm_obj_labels=rm_obj_labels,  # [#boxes]
             rm_box_deltas=box_deltas,  # [#boxes, 151, 4]
-            rm_box_priors=box_priors,  # [#boxes, 4]
+            rm_box_priors=box_priors,  # [#boxes, 4], rois without delta considered
             rm_box_targets=bbox_targets if self.mode != 'refinerels' else rm_bbox_targets ,  # when sgdet, [384,4]; but assigned in "rpn_boxes" when rpntraining
 
             obj_scores=nms_scores,  # [#boxes]
@@ -407,8 +423,8 @@ class ObjectDetector(nn.Module):
             rm_obj_fmap=None,
             rel_labels=rel_labels,  # None
 
-            boxes_assigned=nms_boxes_assign,  # [#boxes, 4]
-            boxes_all=nms_boxes,  # [#boxes, 151, 4]
+            boxes_assigned=nms_boxes_assign,  # [#boxes, 4], box pred with delta for certain class
+            boxes_all=nms_boxes,  # [#boxes, 151, 4], box pred with delta for all classes except nms_boxes[:,0]
             im_inds=im_inds,  # [#boxes]
             fmap=fmap if return_fmap else None,   # image feature map, [batch_size=6, dim=512, IM_SIZE/k=37, IM_SIZE/k=37]
 
@@ -417,12 +433,12 @@ class ObjectDetector(nn.Module):
     def nms_boxes(self, obj_dists, rois, box_deltas, im_sizes):
         """
         Performs NMS on the boxes
-        :param obj_dists: [#rois, #classes], ex:[]
-        :param rois: [#rois, 5]
+        :param obj_dists: [#rois, #classes], ex:[4000+, 151]
+        :param rois: [#rois, 5], ex:[4000+, 5]
         :param box_deltas: [#rois, #classes, 4]
         :param im_sizes: sizes of images [6,3]
         :return
-            nms_inds [#nms]
+            nms_inds [#nms], ex: #nms=384
             nms_scores [#nms]
             nms_labels [#nms]
             nms_boxes_assign [#nms, 4]
@@ -459,7 +475,8 @@ class ObjectDetector(nn.Module):
         nms_inds, nms_scores, nms_labels = [torch.cat(x, 0) for x in zip(*dets)]  # [384]
         twod_inds = nms_inds * boxes.size(1) + nms_labels.data
         nms_boxes_assign = boxes.view(-1, 4)[twod_inds]
-
+        # nms_boxes: [384,151,4], the first dim of 151 is not "0" background class, it's rois
+        # rois[:, 1:][nms_inds][:, None].shape: [384, 1, 4]; boxes[nms_inds][:, 1:]: [384,150,4]
         nms_boxes = torch.cat((rois[:, 1:][nms_inds][:, None], boxes[nms_inds][:, 1:]), 1)
         return nms_inds, nms_scores, nms_labels, nms_boxes_assign, nms_boxes, inds[nms_inds]
 
@@ -588,13 +605,15 @@ class RPNHead(nn.Module):
 
     def anchor_preds(self, preds, train_anchor_inds, image_offset):
         """
-        Get predictions for the training indices
+        Get [1536,2] scores and [1536,4] deltas from [6*37*37*20,6]
+        1536 location bases are provided by train_anchor_inds
         :param preds: [batch_size, IM_SIZE/16, IM_SIZE/16, A, 6]
-        :param train_anchor_inds: [num_train, 4] indices into the predictions
+        :param train_anchor_inds: [nusm_train, 4] indices into the predictions
         :return: class_preds: [num_train, 2] array of yes/no
                  box_preds:   [num_train, 4] array of predicted boxes
         """
         assert train_anchor_inds.size(1) == 4
+        #ipdb.set_trace()
         tai = train_anchor_inds.data.clone()
         tai[:, 0] -= image_offset
         train_regions = gather_nd(preds, tai)
@@ -615,6 +634,7 @@ class RPNHead(nn.Module):
 
     def roi_proposals(self, fmap, im_sizes, nms_thresh=0.7, pre_nms_topn=12000, post_nms_topn=2000):
         """
+        Produce rois (training <=2000 per img; testing <=1000 per img)
         :param fmap: [batch_size, IM_SIZE/16, IM_SIZE/16, A, 6]
         :param im_sizes:        [batch_size, 3] numpy array of (h, w, scale)
         :return: ROIS: shape [a <=post_nms_topn, 5] array of ROIS.

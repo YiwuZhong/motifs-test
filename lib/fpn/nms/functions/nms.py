@@ -10,7 +10,7 @@ def apply_nms(scores, boxes,  pre_nms_topn=12000, post_nms_topn=2000, boxes_per_
     Note - this function is non-differentiable so everything is assumed to be a tensor, not
     a variable.
         """
-    # boxes_per_im: [27380, 27380, 27380, 27380, 27380, 27380]
+    # when boxes_per_im: [27380, 27380, 27380, 27380, 27380, 27380]
     just_inds = boxes_per_im is None
     if boxes_per_im is None:
         boxes_per_im = [boxes.size(0)]

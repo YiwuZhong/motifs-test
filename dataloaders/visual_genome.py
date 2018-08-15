@@ -18,7 +18,7 @@ from dataloaders.image_transforms import SquarePad, Grayscale, Brightness, Sharp
     RandomOrder, Hue, random_crop
 from collections import defaultdict
 from pycocotools.coco import COCO
-
+import ipdb
 
 class VG(Dataset):
     def __init__(self, mode, roidb_file=VG_SGG_FN, dict_file=VG_SGG_DICT_FN,
@@ -28,9 +28,9 @@ class VG(Dataset):
         """
         Torch dataset for VisualGenome
         :param mode: Must be train, test, or val
-        :param roidb_file:  HDF5 containing the GT boxes, classes, and relationships
-        :param dict_file: JSON Contains mapping of classes/relationships to words
-        :param image_file: HDF5 containing image filenames
+        :param roidb_file: VG-SGG.h5
+        :param dict_file: VG-SGG-dicts.json
+        :param image_file: image_data.json
         :param filter_empty_rels: True if we filter out images without relationships between
                              boxes. One might want to set this to false if training a detector.
         :param filter_duplicate_rels: Whenever we see a duplicate relationship we'll sample instead
@@ -40,14 +40,15 @@ class VG(Dataset):
         :param proposal_file: If None, we don't provide proposals. Otherwise file for where we get RPN
             proposals
         """
+        #ipdb.set_trace()
         if mode not in ('test', 'train', 'val'):
             raise ValueError("Mode must be in test, train, or val. Supplied {}".format(mode))
         self.mode = mode
 
         # Initialize
-        self.roidb_file = roidb_file
-        self.dict_file = dict_file
-        self.image_file = image_file
+        self.roidb_file = roidb_file  # HDF5 containing the GT boxes, classes, and relationships
+        self.dict_file = dict_file  # JSON Contains mapping of classes/relationships to words
+        self.image_file = image_file  # HDF5 containing image filenames
 
         self.filter_non_overlap = filter_non_overlap
         self.filter_duplicate_rels = filter_duplicate_rels and self.mode == 'train'
@@ -58,26 +59,27 @@ class VG(Dataset):
             filter_empty_rels=filter_empty_rels,
             filter_non_overlap=self.filter_non_overlap and self.is_train,
         )
-
+        
         # list
         self.filenames = load_image_filenames(image_file)
         # get the train list if 'train'; get the 'test' list if 'test'; get the 'val' list if 'val'
         self.filenames = [self.filenames[i] for i in np.where(self.split_mask)[0]]
-        
+
+
         if self.mode == 'train':
-            num_for_train = 5000
+            num_for_train = 25000
             self.gt_boxes = self.gt_boxes[:num_for_train]
             self.gt_classes = self.gt_classes[:num_for_train]
             self.relationships = self.relationships[:num_for_train]
             self.filenames = self.filenames[:num_for_train]
         elif self.mode == 'val':
-            num_for_val = 500
+            num_for_val = 1000
             self.gt_boxes = self.gt_boxes[:num_for_val]
             self.gt_classes = self.gt_classes[:num_for_val]
             self.relationships = self.relationships[:num_for_val]
             self.filenames = self.filenames[:num_for_val]
         elif self.mode == 'test':
-            num_for_test = 100
+            num_for_test = 4000
             self.gt_boxes = self.gt_boxes[:num_for_test]
             self.gt_classes = self.gt_classes[:num_for_test]
             self.relationships = self.relationships[:num_for_test]
@@ -171,10 +173,10 @@ class VG(Dataset):
     @classmethod
     def splits(cls, *args, **kwargs):
         """ Helper method to generate splits of the dataset"""
-        train = cls('train', *args, **kwargs)
-        val = cls('val', *args, **kwargs)
-        test = cls('test', *args, **kwargs)
-        return train, val, test
+        train = cls('train', *args, **kwargs)  # initial a VG class object
+        val = cls('val', *args, **kwargs)  # initial a VG class object
+        test = cls('test', *args, **kwargs)  # initial a VG class object
+        return train, val, test  # return 3 objects of VG class
 
     def __getitem__(self, index):
         image_unpadded = Image.open(self.filenames[index]).convert('RGB')
@@ -439,9 +441,10 @@ class VGDataLoader(torch.utils.data.DataLoader):
     def splits(cls, train_data, val_data, batch_size=3, num_workers=1, num_gpus=3, mode='det',
                **kwargs):
         assert mode in ('det', 'rel')
+        # initial a DataLoader object (parent class)
         train_load = cls(
             dataset=train_data,
-            batch_size=batch_size * num_gpus,
+            batch_size=batch_size * num_gpus,  # 18 = 6 * 3
             shuffle=True,
             num_workers=num_workers,
             collate_fn=lambda x: vg_collate(x, mode=mode, num_gpus=num_gpus, is_train=True),
@@ -449,6 +452,7 @@ class VGDataLoader(torch.utils.data.DataLoader):
             # pin_memory=True,
             **kwargs,
         )
+        # initial a DataLoader object (parent class)
         val_load = cls(
             dataset=val_data,
             batch_size=batch_size * num_gpus if mode=='det' else num_gpus,

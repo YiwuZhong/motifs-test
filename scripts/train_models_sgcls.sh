@@ -18,7 +18,7 @@ elif [ $1 == "2" ]; then
 
     python models/train_rels.py -m sgcls -model motifnet -order leftright -nl_obj 2 -nl_edge 4 -b 6 -clip 5 \
         -p 100 -hidden_dim 512 -pooling_dim 4096 -lr 1e-3 -ngpu 3 -ckpt checkpoints/downloaded_ckpt/vg-faster-rcnn.tar \
-        -save_dir checkpoints/motifnet2 -nepoch 50 -use_bias
+        -save_dir checkpoints/motifnet2 -nepoch 100 -use_bias
 fi
 
 

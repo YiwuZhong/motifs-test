@@ -29,6 +29,7 @@ from lib.word_vectors import obj_edge_vectors
 from lib.fpn.roi_align.functions.roi_align import RoIAlignFunction
 import math
 import ipdb
+from numpy import linalg as LA
 
 
 def _sort_by_score(im_inds, scores):
@@ -249,7 +250,6 @@ class LinearizedContext(nn.Module):
             obj_preds = obj_labels
             obj_dists = Variable(to_onehot(obj_preds.data, self.num_classes))
 
-
         #obj_preds = Variable(F.softmax(obj_dists, dim=1).data[:, 1:].max(1)[1] + 1)
         encoder_rep = encoder_rep[inv_perm]
 
@@ -430,36 +430,7 @@ class RelModel(nn.Module):
         self.rel_compress.weight = torch.nn.init.xavier_normal(self.rel_compress.weight, gain=1.0)
         if self.use_bias:
             self.freq_bias = FrequencyBias()
-        
-        # not too large; because in the same img, rel class is mostly 0; if too large, most neg rel is repeated
-        self.neg_num = 3
 
-
-        """
-        self.embdim = 100 
-        self.obj1_fc= nn.Sequential(
-            nn.BatchNorm1d(4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, self.num_classes * self.embdim, bias=True),
-            nn.BatchNorm1d(self.num_classes * self.embdim),
-            nn.ReLU(inplace=True),
-        )
-        self.obj2_fc= nn.Sequential(
-            nn.BatchNorm1d(4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, self.num_classes * self.embdim, bias=True),
-            nn.BatchNorm1d(self.num_classes * self.embdim),
-            nn.ReLU(inplace=True),
-        )
-        self.rel_seq = nn.Sequential(
-            nn.BatchNorm1d(4096),
-            nn.ReLU(inplace=True),
-            nn.Linear(4096, self.num_rels * self.embdim, bias=True),
-            nn.BatchNorm1d(self.num_rels * self.embdim),
-            nn.ReLU(inplace=True),
-        )
-        #self.new_roi_fmap_obj = load_vgg(pretrained=False).classifier
-        """
 
     @property
     def num_classes(self):
@@ -515,64 +486,6 @@ class RelModel(nn.Module):
         feature_pool = RoIAlignFunction(self.pooling_size, self.pooling_size, spatial_scale=1 / 16)(
             features, rois)
         return self.roi_fmap_obj(feature_pool.view(rois.size(0), -1))  # vgg.classifier
-    def new_obj_feature_map(self, features, rois):
-        """
-        Gets the ROI features
-        :param features: [batch_size, dim, IM_SIZE/4, IM_SIZE/4] (features at level p2)
-        :param rois: [num_rois, 5] array of [img_num, x0, y0, x1, y1].
-        :return: [num_rois, #dim] array
-        """
-        feature_pool = RoIAlignFunction(self.pooling_size, self.pooling_size, spatial_scale=1 / 16)(
-            features, rois)
-        return self.new_roi_fmap_obj(feature_pool.view(rois.size(0), -1))  # vgg.classifier
-
-    def get_neg_examples(self, rel_labels):
-        """
-        Given relationship combination (positive examples), return the negative examples.
-        :param rel_labels: [num_rels, 4] (img ind, box0 ind, box1ind, rel type)
-        :return: neg_rel_labels: [num_rels, 4] (img ind, box0 ind, box1ind, rel type)
-        """
-        neg_rel_labels = []
-
-        num_im = rel_labels.data[:,0].max()+1
-        im_inds = rel_labels.data.cpu().numpy()[:,0]
-        rel_type = rel_labels.data.cpu().numpy()[:,3]
-        box_pairs = rel_labels.data.cpu().numpy()[:,:3]
-
-        for im_ind in range(num_im):
-
-            pred_ind = np.where(im_inds == im_ind)[0]
-         
-            rel_type_i = rel_type[pred_ind]
-
-            rel_labels_i = box_pairs[pred_ind][:,None,:]
-            row_num = rel_labels_i.shape[0]
-            rel_labels_i = torch.LongTensor(rel_labels_i).expand_as(torch.Tensor(row_num, self.neg_num, 3))
-            neg_pairs_i = rel_labels_i.contiguous().view(-1, 3).cpu().numpy()
-
-            neg_rel_type_i = np.zeros(self.neg_num)
-
-            for k in range(rel_type_i.shape[0]):
-
-                neg_rel_type_k = np.delete(rel_type_i, np.where(rel_type_i == rel_type_i[k])[0]) # delete same rel class
-                #assert neg_rel_type_k.shape[0] != 0
-                if neg_rel_type_k.shape[0] != 0: 
-                    neg_rel_type_k = np.random.choice(neg_rel_type_k, size=self.neg_num, replace=True)
-                    neg_rel_type_i = np.concatenate((neg_rel_type_i,neg_rel_type_k),axis=0)
-                else:
-                    orig_cls = np.arange(self.num_rels)
-                    cls_pool = np.delete(orig_cls, np.where( orig_cls == rel_type_i[k] )[0])
-                    neg_rel_type_k = np.random.choice(cls_pool, size=self.neg_num, replace=False)
-                    neg_rel_type_i = np.concatenate((neg_rel_type_i,neg_rel_type_k),axis=0) 
-
-            neg_rel_type_i = np.delete(neg_rel_type_i, np.arange(self.neg_num))  # delete the first few rows
-            assert neg_pairs_i.shape[0] == neg_rel_type_i.shape[0]
-            neg_rel_labels.append(np.column_stack((neg_pairs_i,neg_rel_type_i)))
-
-        neg_rel_labels = torch.LongTensor(np.concatenate(np.array(neg_rel_labels), 0))
-        neg_rel_labels = neg_rel_labels.cuda(rel_labels.get_device(), async=True)
-
-        return neg_rel_labels
 
     def forward(self, x, im_sizes, image_offset,
                 gt_boxes=None, gt_classes=None, gt_rels=None, proposals=None, train_anchor_inds=None,
@@ -602,6 +515,10 @@ class RelModel(nn.Module):
                                train_anchor_inds, return_fmap=True)
         if result.is_none():
             return ValueError("heck")
+
+        #rcnn_pred = result.rm_obj_dists[:, 1:].max(1)[1] + 1  # +1: because the index is in 150-d but truth is 151-d
+        #rcnn_ap = torch.mean((rcnn_pred == result.rm_obj_labels).float().cpu())
+
         im_inds = result.im_inds - image_offset
         # boxes: [#boxes, 4], without box deltas; where narrow error comes from, should .detach()
         boxes = result.rm_box_priors.detach()   
@@ -612,21 +529,14 @@ class RelModel(nn.Module):
                                                 gt_boxes.data, gt_classes.data, gt_rels.data,
                                                 image_offset, filter_non_overlap=True,
                                                 num_sample_per_gt=1)
-            rel_labels_neg = self.get_neg_examples(result.rel_labels)
-            rel_inds_neg = rel_labels_neg[:,:3]
 
         rel_inds = self.get_rel_inds(result.rel_labels, im_inds, boxes)  #[275,3], [im_inds, box1_inds, box2_inds]
-        
+
         # rois: [#boxes, 5]
         rois = torch.cat((im_inds[:, None].float(), boxes), 1)
         # result.rm_obj_fmap: [384, 4096]
         #result.rm_obj_fmap = self.obj_feature_map(result.fmap.detach(), rois) # detach: prevent backforward flowing
         result.rm_obj_fmap = self.obj_feature_map(result.fmap.detach(), rois.detach()) # detach: prevent backforward flowing
-
-        ############### Box Loss in BiLSTM ################
-        #result.lstm_box_deltas = self.bbox_fc(result.rm_obj_fmap).view(-1, len(self.classes), 4)
-        ############### Box Loss in BiLSTM ################
-
 
         # BiLSTM
         result.rm_obj_dists, result.rm_obj_preds, edge_ctx = self.context(
@@ -636,7 +546,13 @@ class RelModel(nn.Module):
             im_inds, result.rm_obj_labels if self.training or self.mode == 'predcls' else None,
             boxes.data, result.boxes_all.detach() if self.mode == 'sgdet' else result.boxes_all)
         
-
+        #lstm_ap = torch.mean((result.rm_obj_preds == result.rm_obj_labels).float().cpu())
+        #fg_ratio = result.rm_obj_labels.nonzero().size(0) / result.rm_obj_labels.size(0)
+        #lst = [rcnn_ap.data.numpy(), lstm_ap.data.numpy(), fg_ratio]
+        #a = torch.stack((rel_inds[:64, 1], rel_inds[:64, 2]), 0)
+        #b = np.unique(a.cpu().numpy())
+        #print(len(b) / 64)
+        
         # Post Processing
         # nl_egde <= 0
         if edge_ctx is None:
@@ -647,10 +563,12 @@ class RelModel(nn.Module):
      
         # Split into subject and object representations
         edge_rep = edge_rep.view(edge_rep.size(0), 2, self.pooling_dim)  #[384,2,4096]
+
         subj_rep = edge_rep[:, 0]  # [384,4096]
         obj_rep = edge_rep[:, 1]  # [384,4096]
-        prod_rep = subj_rep[rel_inds[:, 1]] * obj_rep[rel_inds[:, 2]]  # prod_rep, rel_inds: [275,4096], [275,3]
-    
+        
+        # prod_rep, rel_inds: [275,4096], [275,3]
+        prod_rep = subj_rep[rel_inds[:, 1]] * obj_rep[rel_inds[:, 2]]     
 
         if self.use_vision: # True when sgdet
             # union rois: fmap.detach--RoIAlignFunction--roifmap--vr [275,4096]
@@ -658,16 +576,10 @@ class RelModel(nn.Module):
 
             if self.limit_vision:  # False when sgdet
                 # exact value TBD
-                prod_rep = torch.cat((prod_rep[:,:2048] * vr[:,:2048], prod_rep[:,2048:]), 1) 
+                prod_rep = torch.cat((prod_rep[:,:2048] * vr[:,:2048], prod_rep[:,2048:]), 1)
             else:
                 prod_rep = prod_rep * vr  # [275,4096]
-                if self.training:
-                    prod_rep_neg = subj_rep[rel_inds_neg[:, 1]] * obj_rep[rel_inds_neg[:, 2]]
-                    vr_neg = self.visual_rep(result.fmap.detach(), rois, rel_inds_neg[:, 1:])
-                    prod_rep_neg = prod_rep_neg * vr_neg 
-                    rel_dists_neg = self.rel_compress(prod_rep_neg)
-                    
-
+ 
         if self.use_tanh:  # False when sgdet
             prod_rep = F.tanh(prod_rep)
 
@@ -679,52 +591,7 @@ class RelModel(nn.Module):
                 result.rm_obj_preds[rel_inds[:, 2]],
             ), 1))
 
-
         if self.training:
-            twod_inds = arange(result.rm_obj_preds.data) * self.num_classes + result.rm_obj_preds.data
-            result.obj_scores = F.softmax(result.rm_obj_dists, dim=1).view(-1)[twod_inds]   # [384]
-            # positive overall score
-            obj_scores0 = result.obj_scores.data[rel_inds[:,1]]
-            obj_scores1 = result.obj_scores.data[rel_inds[:,2]]
-            rel_rep = F.softmax(result.rel_dists, dim=1)    # [275, 51]
-            pred_scores_max, pred_classes_argmax = rel_rep.data[:,:].max(1)  # all classes
-            prob_score = pred_scores_max * obj_scores0 * obj_scores1
-            pos_prob = torch.cat((prob_score, torch.ones(prob_score.size(0),1).cuda()), 1)  # [275,2]
-            # negative overall score
-            obj_scores0_neg = result.obj_scores.data[rel_inds_neg[:,1]]
-            obj_scores1_neg = result.obj_scores.data[rel_inds_neg[:,2]]
-            rel_rep_neg = F.softmax(rel_dists_neg, dim=1)   
-            pred_scores_max_neg, pred_classes_argmax_neg = rel_rep_neg.data[:,:].max(1)  # all classes
-            prob_score_neg = pred_scores_max_neg * obj_scores0_neg * obj_scores1_neg
-            neg_prob = torch.cat((prob_score_neg, torch.ones(prob_score_neg.size(0),1).cuda()), 1)  # [275*neg_num,2]
-
-
-            all_prob = torch.cat((pos_prob,neg_prob), 0)
-            sorted_prob, sort_prob_inds = torch.sort(all_prob.view(-1), dim=0, descending=True)
-
-            #用if-else条件sort 可能无法回传
-
-
-
-            # pos_exp: [275, 100] * self.neg_num
-            twod_inds1 = arange(rel_inds[:, 1]) * self.num_classes + result.rm_obj_preds.data[rel_inds[:, 1]]
-            twod_inds2 = arange(rel_inds[:, 2]) * self.num_classes + result.rm_obj_preds.data[rel_inds[:, 2]]
-            rel_type = result.rel_labels[:, 3].data # [275]
-            twod_inds_r = arange(rel_type) * self.num_rels + rel_type
-            
-            twod_inds1 = twod_inds1[:,None].expand_as(torch.Tensor(twod_inds1.size(0), self.neg_num)).contiguous().view(-1)
-            twod_inds2 = twod_inds2[:,None].expand_as(torch.Tensor(twod_inds2.size(0), self.neg_num)).contiguous().view(-1)
-            twod_inds_r = twod_inds_r[:,None].expand_as(torch.Tensor(twod_inds_r.size(0), self.neg_num)).contiguous().view(-1)
-            result.pos = obj1.view(-1,self.embdim)[twod_inds1] + rel_emb.view(-1,self.embdim)[twod_inds_r] - obj2.view(-1,self.embdim)[twod_inds2]
-
-            # neg_exp: [275 * self.neg_num, 100]
-            twod_inds1_neg = arange(rel_inds_neg[:, 1]) * self.num_classes + result.rm_obj_preds.data[rel_inds_neg[:, 1]]
-            twod_inds2_neg = arange(rel_inds_neg[:, 2]) * self.num_classes + result.rm_obj_preds.data[rel_inds_neg[:, 2]]
-            rel_type_neg = rel_labels_neg[:, 3]  # [275 * neg_num]
-            twod_inds_r_neg = arange(rel_type_neg) * self.num_rels + rel_type_neg
-            result.neg = obj1_neg.view(-1,self.embdim)[twod_inds1_neg] + rel_emb_neg.view(-1,self.embdim)[twod_inds_r_neg] - obj2_neg.view(-1,self.embdim)[twod_inds2_neg]
-            
-            result.anchor = Variable(torch.zeros(result.pos.size(0), self.embdim).cuda())
             return result
         
         ###################### Testing ###########################
@@ -741,12 +608,11 @@ class RelModel(nn.Module):
             bboxes = result.rm_box_priors
 
         rel_rep = F.softmax(result.rel_dists, dim=1)    # [275, 51]
-        
+
         # sort product of obj1 * obj2 * rel
         return filter_dets(bboxes, result.obj_scores,
                            result.rm_obj_preds, rel_inds[:, 1:],
-                           rel_rep, obj1=None, obj2=None, rel_emb=None)
-
+                           rel_rep)
 
     def __getitem__(self, batch):
         """ Hack to do multi-GPU training"""
@@ -760,107 +626,3 @@ class RelModel(nn.Module):
         if self.training:
             return gather_res(outputs, 0, dim=0)
         return outputs
-
-
-"""     
-        ###################### Faster RCNN output statistics ####################
-        # RoIs ARecall  0.80420
-        pred_to_gtbox = bbox_overlaps(boxes.data, gt_boxes.data)
-        im_inds = result.im_inds 
-        pred_to_gtbox[im_inds.data[:, None] != gt_classes.data[None, :, 0]] = 0.0
-        max_overlaps, argmax_overlaps = pred_to_gtbox.max(0)
-        gt_matched = result.rm_obj_labels.data[argmax_overlaps]
-        assert gt_matched.size(0) == gt_classes.size(0)
-        gt_matched[max_overlaps < 0.5] = -1
-        gt_matched = gt_matched + 1
-        result.ratio = torch.nonzero(gt_matched).size(0) / gt_classes.size(0)
-        return result.ratio
-
-
-        # RoIs APrecision  0.20733
-        pred_to_gtbox = bbox_overlaps(boxes.data, gt_boxes.data)
-        im_inds = result.im_inds 
-        pred_to_gtbox[im_inds.data[:, None] != gt_classes.data[None, :, 0]] = 0.0
-        max_overlaps, argmax_overlaps = pred_to_gtbox.max(1)
-        labels = gt_classes[:, 1][argmax_overlaps]
-        labels[max_overlaps < 0.5] = 0
-        result.ratio = torch.nonzero(labels).size(0) / labels.size(0)
-        return result.ratio        
-
-
-        # RoIs and obj_dists APrecision  0.11950
-        pred_to_gtbox = bbox_overlaps(boxes.data, gt_boxes.data)
-        im_inds = result.im_inds 
-        pred_to_gtbox[im_inds.data[:, None] != gt_classes.data[None, :, 0]] = 0.0
-        max_overlaps, argmax_overlaps = pred_to_gtbox.max(1)
-        labels = gt_classes[:, 1][argmax_overlaps]
-        labels[max_overlaps < 0.5] = 0
-        obj_cls_pred = result.rm_obj_dists.data.max(1)[1]  # same as obj_pred after softmax
-        not_matched = obj_cls_pred != result.rm_obj_labels.data
-        labels[not_matched] = 0
-        result.ratio = torch.nonzero(labels).size(0) / labels.size(0)
-        return result.ratio
-
-
-        # Box APrecision 
-        obj_scores = F.softmax(result.rm_obj_dists, dim=1)
-        result.rm_obj_preds = obj_scores.data.max(1)[1]
-        twod_inds = arange(result.rm_obj_preds) * self.num_classes + result.rm_obj_preds
-        bboxes = result.boxes_all.view(-1, 4)[twod_inds].view(result.boxes_all.size(0), 4)
-        pred_to_gtbox = bbox_overlaps(bboxes.data, gt_boxes.data)
-        im_inds = result.im_inds 
-        pred_to_gtbox[im_inds.data[:, None] != gt_classes.data[None, :, 0]] = 0.0
-        max_overlaps, argmax_overlaps = pred_to_gtbox.max(1)
-        labels = gt_classes[:, 1][argmax_overlaps]
-        labels[max_overlaps < 0.5] = 0
-        result.ratio = torch.nonzero(labels).size(0) / labels.size(0)
-        return result.ratio
-
-
-        # Box and obj_dists APrecision  
-        obj_scores = F.softmax(result.rm_obj_dists, dim=1)
-        result.rm_obj_preds = obj_scores.data.max(1)[1]
-        twod_inds = arange(result.rm_obj_preds) * self.num_classes + result.rm_obj_preds
-        bboxes = result.boxes_all.view(-1, 4)[twod_inds].view(result.boxes_all.size(0), 4)
-        pred_to_gtbox = bbox_overlaps(bboxes.data, gt_boxes.data)
-        im_inds = result.im_inds 
-        pred_to_gtbox[im_inds.data[:, None] != gt_classes.data[None, :, 0]] = 0.0
-        max_overlaps, argmax_overlaps = pred_to_gtbox.max(1)
-        labels = gt_classes[:, 1][argmax_overlaps]
-        labels[max_overlaps < 0.5] = 0
-        labels[result.rm_obj_preds != result.rm_obj_labels.data] = 0
-        result.ratio = torch.nonzero(labels).size(0) / labels.size(0)
-        return result.ratio
-
-        ###################### Faster RCNN output statistics ####################
-        
-
-
-        ###################### LSTM output statistics ####################
-        # Box APrecision  0.26910
-        twod_inds = arange(result.rm_obj_preds.data) * self.num_classes + result.rm_obj_preds.data
-        bboxes = result.boxes_all.view(-1, 4)[twod_inds].view(result.boxes_all.size(0), 4)
-        pred_to_gtbox = bbox_overlaps(bboxes.data, gt_boxes.data)
-        im_inds = result.im_inds 
-        pred_to_gtbox[im_inds.data[:, None] != gt_classes.data[None, :, 0]] = 0.0
-        max_overlaps, argmax_overlaps = pred_to_gtbox.max(1)
-        labels = gt_classes[:, 1][argmax_overlaps]
-        labels[max_overlaps < 0.5] = 0
-        result.ratio = torch.nonzero(labels).size(0) / labels.size(0)
-        return result.ratio
-
-
-        # Box and obj_dists APrecision  0.12222
-        twod_inds = arange(result.rm_obj_preds.data) * self.num_classes + result.rm_obj_preds.data
-        bboxes = result.boxes_all.view(-1, 4)[twod_inds].view(result.boxes_all.size(0), 4)
-        pred_to_gtbox = bbox_overlaps(bboxes.data, gt_boxes.data)
-        im_inds = result.im_inds 
-        pred_to_gtbox[im_inds.data[:, None] != gt_classes.data[None, :, 0]] = 0.0
-        max_overlaps, argmax_overlaps = pred_to_gtbox.max(1)
-        labels = gt_classes[:, 1][argmax_overlaps]
-        labels[max_overlaps < 0.5] = 0
-        obj_cls_pred = result.rm_obj_dists.data.max(1)[1]  # same as obj_pred after softmax
-        labels[obj_cls_pred != result.rm_obj_labels.data] = 0
-        result.ratio = torch.nonzero(labels).size(0) / labels.size(0)
-        return result.ratio
-"""

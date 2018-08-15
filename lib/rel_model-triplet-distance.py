@@ -430,13 +430,23 @@ class RelModel(nn.Module):
         self.rel_compress.weight = torch.nn.init.xavier_normal(self.rel_compress.weight, gain=1.0)
         if self.use_bias:
             self.freq_bias = FrequencyBias()
-        
-        # not too large; because in the same img, rel class is mostly 0; if too large, most neg rel is repeated
-        self.neg_num = 3
 
+
+        self.embdim = 100 
+        # not too large; because in the same img, rel class is mostly 0; if too large, most neg rel is repeated
+        self.neg_num = 10
 
         """
-        self.embdim = 100 
+        #self.bbox_fc = nn.Linear(4096, len(self.classes) * 4)
+        self.obj_fc1 = nn.Linear(4096, self.num_classes * self.embdim, bias=True)
+        self.obj_fc1.weight = torch.nn.init.xavier_normal(self.obj_fc1.weight, gain=1.0)
+        self.obj_fc2 = nn.Linear(4096, self.num_classes * self.embdim, bias=True)
+        self.obj_fc2.weight = torch.nn.init.xavier_normal(self.obj_fc2.weight, gain=1.0)
+        self.rel_fc = nn.Linear(4096, self.num_rels * self.embdim, bias=True)
+        self.rel_fc.weight = torch.nn.init.xavier_normal(self.rel_fc.weight, gain=1.0)
+        self.new_roi_fmap_obj = load_vgg(pretrained=False).classifier
+        """
+
         self.obj1_fc= nn.Sequential(
             nn.BatchNorm1d(4096),
             nn.ReLU(inplace=True),
@@ -459,7 +469,7 @@ class RelModel(nn.Module):
             nn.ReLU(inplace=True),
         )
         #self.new_roi_fmap_obj = load_vgg(pretrained=False).classifier
-        """
+
 
     @property
     def num_classes(self):
@@ -606,6 +616,10 @@ class RelModel(nn.Module):
         # boxes: [#boxes, 4], without box deltas; where narrow error comes from, should .detach()
         boxes = result.rm_box_priors.detach()   
 
+
+
+
+        """
         if self.training and result.rel_labels is None:
             assert self.mode == 'sgdet' # sgcls's result.rel_labels is gt and not None
             result.rel_labels = rel_assignments(im_inds.data, boxes.data, result.rm_obj_labels.data,
@@ -635,8 +649,9 @@ class RelModel(nn.Module):
             result.rm_obj_dists.detach(),  # .detach:Returns a new Variable, detached from the current graph
             im_inds, result.rm_obj_labels if self.training or self.mode == 'predcls' else None,
             boxes.data, result.boxes_all.detach() if self.mode == 'sgdet' else result.boxes_all)
-        
 
+
+        
         # Post Processing
         # nl_egde <= 0
         if edge_ctx is None:
@@ -651,21 +666,34 @@ class RelModel(nn.Module):
         obj_rep = edge_rep[:, 1]  # [384,4096]
         prod_rep = subj_rep[rel_inds[:, 1]] * obj_rep[rel_inds[:, 2]]  # prod_rep, rel_inds: [275,4096], [275,3]
     
+        obj1 = self.obj1_fc(subj_rep[rel_inds[:, 1]])
+        obj1 = obj1.view(obj1.size(0), self.num_classes, self.embdim)  # (275, 151, 10)
+        obj2 = self.obj2_fc(obj_rep[rel_inds[:, 2]])
+        obj2 = obj2.view(obj2.size(0), self.num_classes, self.embdim)  # (275, 151, 10)
+
+        if self.training:
+            prod_rep_neg = subj_rep[rel_inds_neg[:, 1]] * obj_rep[rel_inds_neg[:, 2]]
+            obj1_neg = self.obj1_fc(subj_rep[rel_inds_neg[:, 1]])
+            obj1_neg = obj1_neg.view(obj1_neg.size(0), self.num_classes, self.embdim)  # (275*self.neg_num, 151, 10)
+            obj2_neg = self.obj2_fc(obj_rep[rel_inds_neg[:, 2]])
+            obj2_neg = obj2_neg.view(obj2_neg.size(0), self.num_classes, self.embdim)  # (275*self.neg_num, 151, 10)
 
         if self.use_vision: # True when sgdet
             # union rois: fmap.detach--RoIAlignFunction--roifmap--vr [275,4096]
             vr = self.visual_rep(result.fmap.detach(), rois, rel_inds[:, 1:])
+            #vr = self.visual_rep(result.fmap.detach(), im_bboxes.detach(), rel_inds[:, 1:])
 
             if self.limit_vision:  # False when sgdet
                 # exact value TBD
                 prod_rep = torch.cat((prod_rep[:,:2048] * vr[:,:2048], prod_rep[:,2048:]), 1) 
             else:
                 prod_rep = prod_rep * vr  # [275,4096]
+                rel_emb = self.rel_seq(prod_rep)
+                rel_emb = rel_emb.view(rel_emb.size(0), self.num_rels, self.embdim)  # (275, 51, 10)
                 if self.training:
-                    prod_rep_neg = subj_rep[rel_inds_neg[:, 1]] * obj_rep[rel_inds_neg[:, 2]]
                     vr_neg = self.visual_rep(result.fmap.detach(), rois, rel_inds_neg[:, 1:])
-                    prod_rep_neg = prod_rep_neg * vr_neg 
-                    rel_dists_neg = self.rel_compress(prod_rep_neg)
+                    prod_rep_neg = prod_rep_neg * vr_neg if self.training else None # [275*self.neg_num, 4096]
+                    rel_emb_neg = self.rel_seq(prod_rep_neg)
                     
 
         if self.use_tanh:  # False when sgdet
@@ -681,31 +709,6 @@ class RelModel(nn.Module):
 
 
         if self.training:
-            twod_inds = arange(result.rm_obj_preds.data) * self.num_classes + result.rm_obj_preds.data
-            result.obj_scores = F.softmax(result.rm_obj_dists, dim=1).view(-1)[twod_inds]   # [384]
-            # positive overall score
-            obj_scores0 = result.obj_scores.data[rel_inds[:,1]]
-            obj_scores1 = result.obj_scores.data[rel_inds[:,2]]
-            rel_rep = F.softmax(result.rel_dists, dim=1)    # [275, 51]
-            pred_scores_max, pred_classes_argmax = rel_rep.data[:,:].max(1)  # all classes
-            prob_score = pred_scores_max * obj_scores0 * obj_scores1
-            pos_prob = torch.cat((prob_score, torch.ones(prob_score.size(0),1).cuda()), 1)  # [275,2]
-            # negative overall score
-            obj_scores0_neg = result.obj_scores.data[rel_inds_neg[:,1]]
-            obj_scores1_neg = result.obj_scores.data[rel_inds_neg[:,2]]
-            rel_rep_neg = F.softmax(rel_dists_neg, dim=1)   
-            pred_scores_max_neg, pred_classes_argmax_neg = rel_rep_neg.data[:,:].max(1)  # all classes
-            prob_score_neg = pred_scores_max_neg * obj_scores0_neg * obj_scores1_neg
-            neg_prob = torch.cat((prob_score_neg, torch.ones(prob_score_neg.size(0),1).cuda()), 1)  # [275*neg_num,2]
-
-
-            all_prob = torch.cat((pos_prob,neg_prob), 0)
-            sorted_prob, sort_prob_inds = torch.sort(all_prob.view(-1), dim=0, descending=True)
-
-            #用if-else条件sort 可能无法回传
-
-
-
             # pos_exp: [275, 100] * self.neg_num
             twod_inds1 = arange(rel_inds[:, 1]) * self.num_classes + result.rm_obj_preds.data[rel_inds[:, 1]]
             twod_inds2 = arange(rel_inds[:, 2]) * self.num_classes + result.rm_obj_preds.data[rel_inds[:, 2]]
@@ -741,12 +744,12 @@ class RelModel(nn.Module):
             bboxes = result.rm_box_priors
 
         rel_rep = F.softmax(result.rel_dists, dim=1)    # [275, 51]
-        
+
         # sort product of obj1 * obj2 * rel
         return filter_dets(bboxes, result.obj_scores,
                            result.rm_obj_preds, rel_inds[:, 1:],
-                           rel_rep, obj1=None, obj2=None, rel_emb=None)
-
+                           rel_rep, obj1, obj2, rel_emb)
+        """
 
     def __getitem__(self, batch):
         """ Hack to do multi-GPU training"""
@@ -756,7 +759,7 @@ class RelModel(nn.Module):
 
         replicas = nn.parallel.replicate(self, devices=list(range(self.num_gpus)))
         outputs = nn.parallel.parallel_apply(replicas, [batch[i] for i in range(self.num_gpus)])
-
+        return outputs
         if self.training:
             return gather_res(outputs, 0, dim=0)
         return outputs

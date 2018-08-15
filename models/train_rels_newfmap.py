@@ -30,7 +30,7 @@ elif conf.model == 'stanford':
 else:
     raise ValueError()
 
-init_logging(conf.save_dir + "/distance.log")
+init_logging(conf.save_dir +"/distance-newfmap.log")
 
 train, val, _ = VG.splits(num_val_im=conf.val_size, filter_duplicate_rels=True,
                           use_proposals=conf.use_proposals,
@@ -55,7 +55,6 @@ detector = RelModel(classes=train.ind_to_classes, rel_classes=train.ind_to_predi
                     use_tanh=conf.use_tanh,
                     limit_vision=conf.limit_vision
                     )
-
 # Freeze the detector
 # .named_parameters(): returns (string, Parameter), Tuple containing the name and parameter itself
 for n, param in detector.detector.named_parameters():
@@ -72,8 +71,6 @@ for n, param in detector.detector.named_parameters():
     else:
         continue
     """
-
-
 print(print_para(detector), flush=True)
 
 # optimizer
@@ -110,9 +107,14 @@ if conf.ckpt.split('-')[-2].split('/')[-1] == 'vgrel':
     #detector.bbox_fc.weight.data.copy_(ckpt['state_dict']['detector.bbox_fc.weight'])
     #detector.bbox_fc.bias.data.copy_(ckpt['state_dict']['detector.bbox_fc.bias'])
 
+    # new fmap (rois + certain class deltas)
+    detector.new_roi_fmap_obj[0].weight.data.copy_(ckpt['state_dict']['detector.roi_fmap.0.weight'])
+    detector.new_roi_fmap_obj[3].weight.data.copy_(ckpt['state_dict']['detector.roi_fmap.3.weight'])
+    detector.new_roi_fmap_obj[0].bias.data.copy_(ckpt['state_dict']['detector.roi_fmap.0.bias'])
+    detector.new_roi_fmap_obj[3].bias.data.copy_(ckpt['state_dict']['detector.roi_fmap.3.bias'])
+
     if not optimistic_restore(detector, ckpt['state_dict']):
-        pass
-        #start_epoch = -1
+        start_epoch = -1
         # optimistic_restore(detector.detector, torch.load('checkpoints/vgdet/vg-28.tar')['state_dict'])
 
 # sgcls training
@@ -254,10 +256,11 @@ def train_batch(b, verbose=False):
     # rm_obj_labels.shape:[164]
     # result.rel_labels.shape:[1810, 4], [img_ind, box0_ind, box1_ind, rel_type]
     # result.rel_dists.shape:[1810, 51]
-    losses['distance'] = 0.6 * F.triplet_margin_loss(result.anchor, result.pos, result.neg, margin=0.1, p=2)
-    losses['class_loss'] = 0.2 * F.cross_entropy(result.rm_obj_dists, result.rm_obj_labels)
-    losses['rel_loss'] = 0.2 * F.cross_entropy(result.rel_dists, result.rel_labels[:, -1])
+    losses['distance'] = torch.mean(result.distance)  # gather distance from 3 gpus
+    losses['class_loss'] = F.cross_entropy(result.rm_obj_dists, result.rm_obj_labels)
+    #losses['rel_loss'] = F.cross_entropy(result.rel_dists, result.rel_labels[:, -1])
     loss = sum(losses.values())
+    #ipdb.set_trace()
     optimizer.zero_grad()
     loss.backward()
     clip_grad_norm(

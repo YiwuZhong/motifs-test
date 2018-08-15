@@ -25,7 +25,7 @@ def obj_edge_vectors(names, wv_type='glove.6B', wv_dir=DATA_PATH, wv_dim=300):
         wv_index = wv_dict.get(token, None)
         if wv_index is not None:
             vectors[i] = wv_arr[wv_index]
-        else
+        else:
             # Try the longest word (hopefully won't be a preposition
             lw_token = sorted(token.split(' '), key=lambda x: len(x), reverse=True)[0]
             print("{} -> {} ".format(token, lw_token))

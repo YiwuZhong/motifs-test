@@ -9,7 +9,7 @@ def bbox_loss(prior_boxes, deltas, gt_boxes, eps=1e-4, scale_before=1):
     """
     Computes the loss for predicting the GT boxes from prior boxes
     :param prior_boxes: [num_boxes, 4] (x1, y1, x2, y2)
-    :param deltas: [num_boxes, 4]    (tx, ty, th, tw)
+    :param deltas: [num_boxes, 4]    (tx, ty, th, tw), already normalization tx = (x1 - x2) / w2, tw = log( w1 / w2 )
     :param gt_boxes: [num_boxes, 4] (x1, y1, x2, y2)
     :return:
     """
@@ -19,8 +19,8 @@ def bbox_loss(prior_boxes, deltas, gt_boxes, eps=1e-4, scale_before=1):
     center_targets = (gt_centers[:, :2] - prior_centers[:, :2]) / prior_centers[:, 2:]
     size_targets = torch.log(gt_centers[:, 2:]) - torch.log(prior_centers[:, 2:])
     all_targets = torch.cat((center_targets, size_targets), 1)
-
-    loss = F.smooth_l1_loss(deltas, all_targets, size_average=False)/(eps + prior_centers.size(0))
+    # average value (because size_average=False)
+    loss = F.smooth_l1_loss(deltas, all_targets, size_average=False)/(eps + prior_centers.size(0))  
 
     return loss
 
@@ -133,7 +133,7 @@ def bbox_overlaps(box_a, box_b):
 
 def nms_overlaps(boxes):
     """ get overlaps for each channel"""
-    assert boxes.dim() == 3
+    assert boxes.dim() == 3  # [384, 151, 4]
     N = boxes.size(0)
     nc = boxes.size(1)
     max_xy = torch.min(boxes[:, None, :, 2:].expand(N, N, nc, 2),
