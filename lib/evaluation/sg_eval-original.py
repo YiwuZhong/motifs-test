@@ -6,6 +6,7 @@ from functools import reduce
 from lib.pytorch_misc import intersect_2d, argsort_desc
 from lib.fpn.box_intersections_cpu.bbox import bbox_overlaps
 from config import MODES
+import logging
 np.set_printoptions(precision=3)
 
 class BasicSceneGraphEvaluator:

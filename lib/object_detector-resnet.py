@@ -17,7 +17,7 @@ from lib.pytorch_misc import enumerate_by_image, gather_nd, diagonal_inds, Flatt
 from torchvision.models.vgg import vgg16
 from torchvision.models.resnet import resnet101
 from torch.nn.parallel._functions import Gather
-
+import ipdb
 
 class Result(object):
     """ little container class for holding the detection result
@@ -114,6 +114,7 @@ class ObjectDetector(nn.Module):
         :return: Feature maps at 1/16 the original size.
         Each one is [batch_size, dim, IM_SIZE/k, IM_SIZE/k].
         """
+        ipdb.set_trace()
         if not self.use_resnet:
             return self.features(x)  # Uncomment this for "stanford" setting in which it's frozen:      .detach()
         x = self.features.conv1(x)
@@ -124,7 +125,11 @@ class ObjectDetector(nn.Module):
         c2 = self.features.layer1(x)
         c3 = self.features.layer2(c2)
         c4 = self.features.layer3(c3)
-        return c4
+        # in order to add layer4, need to change img_size in conf file to 592 * 2
+        # then c5: [6, 2048, 37, 37] (originally, c4: [6,1024, 37, 37])
+        c5 = self.features.layer4(c4)
+
+        return c5
 
     def obj_feature_map(self, features, rois):
         """
@@ -280,7 +285,6 @@ class ObjectDetector(nn.Module):
         :param im_sizes: A numpy array of (h, w, scale) for each image.
         :param image_offset: Offset onto what image we're on for MGPU training (if single GPU this is 0)
         :param gt_boxes:
-
         Training parameters:
         :param gt_boxes: [num_gt, 4] GT boxes over the batch.
         :param gt_classes: [num_gt, 2] gt boxes where each one is (img_id, class)
@@ -315,10 +319,8 @@ class ObjectDetector(nn.Module):
             obj_fmap = obj_fmap[nms_inds]
             box_deltas = od_box_deltas[nms_inds]
             box_priors = nms_boxes[:, 0]
-            
-            # original: if (not self.training and not self.mode == 'gtbox'):
-            # when train sgdet, self.training is True and self.mode=='refinerels'
-            if (self.training and not self.mode == 'gtbox'):
+
+            if self.training and not self.mode == 'gtbox':
                 # NOTE: If we're doing this during training, we need to assign labels here.
                 pred_to_gtbox = bbox_overlaps(box_priors, gt_boxes).data
                 pred_to_gtbox[im_inds.data[:, None] != gt_classes.data[None, :, 0]] = 0.0
@@ -523,7 +525,6 @@ class RPNHead(nn.Module):
     def forward(self, fmap):
         """
         Gets the class / noclass predictions over all the scales
-
         :param fmap: [batch_size, dim, IM_SIZE/16, IM_SIZE/16] featuremap
         :return: [batch_size, IM_SIZE/16, IM_SIZE/16, A, 6]
         """
@@ -616,9 +617,9 @@ def filter_roi_proposals(box_preds, class_preds, boxes_per_im, nms_thresh=0.7, p
 
 def load_resnet():
     model = resnet101(pretrained=True)
-    del model.layer4
-    del model.avgpool
-    del model.fc
+    #del model.layer4
+    #del model.avgpool
+    #del model.fc
     return model
 
 

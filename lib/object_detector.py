@@ -15,7 +15,7 @@ from lib.fpn.proposal_assignments.proposal_assignments_det import proposal_assig
 from lib.fpn.roi_align.functions.roi_align import RoIAlignFunction
 from lib.pytorch_misc import enumerate_by_image, gather_nd, diagonal_inds, Flattener
 from torchvision.models.vgg import vgg16
-from torchvision.models.resnet import resnet101
+from torchvision.models.resnet import resnet50
 from torch.nn.parallel._functions import Gather
 import ipdb
 
@@ -85,6 +85,7 @@ class ObjectDetector(nn.Module):
             output_dim = 4096
         else:  # Deprecated
             self.features = load_resnet()
+            """
             self.compress = nn.Sequential(
                 nn.Conv2d(1024, 256, kernel_size=1),
                 nn.ReLU(inplace=True),
@@ -98,6 +99,7 @@ class ObjectDetector(nn.Module):
                 nn.SELU(inplace=True),
                 nn.AlphaDropout(p=0.05),
             )
+            """
             rpn_input_dim = 1024
             output_dim = 2048
 
@@ -126,6 +128,7 @@ class ObjectDetector(nn.Module):
         c2 = self.features.layer1(x)
         c3 = self.features.layer2(c2)
         c4 = self.features.layer3(c3)
+
         return c4
 
     def obj_feature_map(self, features, rois):
@@ -135,9 +138,18 @@ class ObjectDetector(nn.Module):
         :param rois: [num_rois, 5] array of [img_num, x0, y0, x1, y1].
         :return: [num_rois, #dim] array
         """
-        feature_pool = RoIAlignFunction(self.pooling_size, self.pooling_size, spatial_scale=1 / 16)(
-            self.compress(features) if self.use_resnet else features, rois)
-        return self.roi_fmap(feature_pool.view(rois.size(0), -1))
+        if not self.use_resnet:
+            feature_pool = RoIAlignFunction(self.pooling_size, self.pooling_size, spatial_scale=1 / 16)(
+                self.compress(features) if self.use_resnet else features, rois)
+            return self.roi_fmap(feature_pool.view(rois.size(0), -1))
+        else:
+            # feature_pool: [batch, 1024, 8, 8]; x: [batch, 1024, 7, 7]; fc7: [2048, 4, 4] --> [2048]
+            feature_pool = RoIAlignFunction(self.pooling_size+1, self.pooling_size+1, spatial_scale=1 / 16)(features, rois)
+            x = F.avg_pool2d(feature_pool, kernel_size=2, stride=1)
+            fc7 = self.features.layer4(x)
+            fc7 = fc7.mean(3).mean(2)
+            return fc7
+
 
     def rpn_boxes(self, fmap, im_sizes, image_offset, gt_boxes=None, gt_classes=None, gt_rels=None,
                   train_anchor_inds=None, proposals=None):
@@ -339,7 +351,7 @@ class ObjectDetector(nn.Module):
         # od_box_priors: [#rois, 4]
         od_box_priors = rois[:, 1:] if self.mode != 'refinerels' else rois[:,1:].detach()
 
-        # sgdet/refinerels training; proposals (from #rois to #boxes whichi is fed into BiLSTM)
+        # sgdet/refinerels training; proposals (from #rois to #boxes which is fed into BiLSTM)
         if (not self.training and not self.mode == 'gtbox') or self.mode in ('proposals', 'refinerels'):
             # nms_inds, scores, preds, imgs: [384]
             # nms_boxes: [384, 151, 4], box pred for all class
@@ -691,10 +703,10 @@ def filter_roi_proposals(box_preds, class_preds, boxes_per_im, nms_thresh=0.7, p
 
 
 def load_resnet():
-    model = resnet101(pretrained=True)
-    del model.layer4
-    del model.avgpool
-    del model.fc
+    model = resnet50(pretrained=True)
+    #del model.layer4
+    #del model.avgpool
+    #del model.fc
     return model
 
 

@@ -1,11 +1,12 @@
 """
 Training script for scene graph detection. Integrated with my faster rcnn setup
 """
-
+#from __future__ import print_function
 from dataloaders.visual_genome import VGDataLoader, VG
 import numpy as np
 from torch import optim
 import torch
+from torch.autograd import Variable
 import pandas as pd
 import time
 import os
@@ -30,7 +31,7 @@ elif conf.model == 'stanford':
 else:
     raise ValueError()
 
-init_logging(conf.save_dir + "/distance.log")
+init_logging(conf.save_dir + "/tripscore.log")
 
 train, val, _ = VG.splits(num_val_im=conf.val_size, filter_duplicate_rels=True,
                           use_proposals=conf.use_proposals,
@@ -111,10 +112,9 @@ if conf.ckpt.split('-')[-2].split('/')[-1] == 'vgrel':
     #detector.bbox_fc.bias.data.copy_(ckpt['state_dict']['detector.bbox_fc.bias'])
 
     if not optimistic_restore(detector, ckpt['state_dict']):
+        #optimistic_restore(detector.detector, torch.load('/home/yiwuzhong/motifs/checkpoints/downloaded_ckpt/vg-72.tar')['state_dict'])
         pass
-        #start_epoch = -1
-        # optimistic_restore(detector.detector, torch.load('checkpoints/vgdet/vg-28.tar')['state_dict'])
-
+    
 # sgcls training
 else:
     start_epoch = -1
@@ -146,9 +146,17 @@ def train_epoch(epoch_num):
     detector.train()
     tr = []
     start = time.time()
+    allhard = 0
+    allsoft = 0
+    allfenmu = 0
+    n = 0
     for b, batch in enumerate(train_loader):
-        tr.append(train_batch(batch, verbose=b % (conf.print_interval*10) == 0)) #b == 0))
-
+        res, hard, soft, fenmu = train_batch(batch, verbose=b % (conf.print_interval*10) == 0)
+        tr.append(res) #b == 0))
+        allhard += hard
+        allsoft += soft
+        allfenmu += fenmu
+        n += 1
         if b % conf.print_interval == 0 and b >= conf.print_interval:
             mn = pd.concat(tr[-conf.print_interval:], axis=1).mean(1)
             time_per_batch = (time.time() - start) / conf.print_interval
@@ -157,6 +165,12 @@ def train_epoch(epoch_num):
             logging.info(mn)
             print('-----------', flush=True)
             start = time.time()
+    print("hard is:" + str(allhard / n))
+    print("soft is:" + str(allsoft / n))
+    print("fenmu is:" + str(allfenmu / n))
+    logging.info("hard is:" + str(allhard / n))
+    logging.info("soft is:" + str(allsoft / n))
+    logging.info("fenmu is:" + str(allfenmu / n))
     return pd.concat(tr, axis=1)
 
 
@@ -254,20 +268,23 @@ def train_batch(b, verbose=False):
     # rm_obj_labels.shape:[164]
     # result.rel_labels.shape:[1810, 4], [img_ind, box0_ind, box1_ind, rel_type]
     # result.rel_dists.shape:[1810, 51]
-    losses['distance'] = 0.6 * F.triplet_margin_loss(result.anchor, result.pos, result.neg, margin=0.1, p=2)
-    losses['class_loss'] = 0.2 * F.cross_entropy(result.rm_obj_dists, result.rm_obj_labels)
-    losses['rel_loss'] = 0.2 * F.cross_entropy(result.rel_dists, result.rel_labels[:, -1])
+    margin = 0.6
+    losses['triplet'] = 15 * torch.mean(torch.max( result.anchor, result.neg - result.pos + margin ))
+    losses['class_loss'] = F.cross_entropy(result.rm_obj_dists, result.rm_obj_labels)
+    losses['rel_loss'] = F.cross_entropy(result.rel_dists, result.rel_labels[:, -1])
     loss = sum(losses.values())
-    optimizer.zero_grad()
+    optimizer.zero_grad()  # When perform loss.backward() the gradients are accumulated inplace in each Variable that requires gradient
     loss.backward()
     clip_grad_norm(
         [(n, p) for n, p in detector.named_parameters() if p.grad is not None], # p.grad is None when param don't backward propagate
         max_norm=conf.clip, verbose=verbose, clip=True)
     losses['total'] = loss
-    optimizer.step()
+    optimizer.step()  # update the net
     res = pd.Series({x: y.data[0] for x, y in losses.items()})
-    return res
-
+    hard = (result.ratio.data[0] + result.ratio.data[3] + result.ratio.data[6]) / 3
+    soft = (result.ratio.data[1] + result.ratio.data[4] + result.ratio.data[7]) / 3
+    fenmu = (result.ratio.data[2] + result.ratio.data[5] + result.ratio.data[8]) / 3
+    return res, hard, soft, fenmu
 
 def val_epoch():
     detector.eval()
@@ -283,7 +300,7 @@ def val_batch(batch_num, b, evaluator):
     if conf.num_gpus == 1:
         det_res = [det_res]
 
-    for i, (boxes_i, objs_i, obj_scores_i, rels_i, pred_scores_i, sorted_rel_pred_i) in enumerate(det_res):
+    for i, (boxes_i, objs_i, obj_scores_i, rels_i, pred_scores_i) in enumerate(det_res):
         gt_entry = {
             'gt_classes': val.gt_classes[batch_num + i].copy(),
             'gt_relations': val.relationships[batch_num + i].copy(),
@@ -297,7 +314,6 @@ def val_batch(batch_num, b, evaluator):
             'pred_rel_inds': rels_i,
             'obj_scores': obj_scores_i,
             'rel_scores': pred_scores_i,  # hack for now.
-            'sorted_rel_pred': sorted_rel_pred_i,
         }
 
         evaluator[conf.mode].evaluate_scene_graph_entry(

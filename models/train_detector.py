@@ -20,11 +20,11 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from init_logging import init_logging
 import logging
 import ipdb
-init_logging("/home/yiwuzhong/motifs/logging/" + "train_detector.log")
+
 
 cudnn.benchmark = True
 conf = ModelConfig()
-
+init_logging(conf.save_dir + "/train_detector.log")
 if conf.coco:
     train, val = CocoDetection.splits()
     val.ids = val.ids[:conf.val_size]

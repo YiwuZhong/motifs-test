@@ -21,7 +21,7 @@ class RoIAlignFunction(Function):
 
         self.feature_size = features.size()
         batch_size, num_channels, data_height, data_width = self.feature_size
-
+        # add for input size like 37 by 37
         height = (data_height -1) / self.spatial_scale
         width = (data_width - 1) / self.spatial_scale
 
@@ -33,8 +33,7 @@ class RoIAlignFunction(Function):
 
         num_rois = rois.size(0)
 
-        output = features.new(num_rois, num_channels, self.aligned_height,
-            self.aligned_width).zero_()
+        output = features.new(num_rois, num_channels, self.aligned_height, self.aligned_width).zero_()
 
         if features.is_cuda:
             res = roi_align.roi_align_forward_cuda(self.aligned_height,

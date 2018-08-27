@@ -59,7 +59,7 @@ def rel_assignments(im_inds, rpn_rois, roi_gtlabels, gt_boxes, gt_classes, gt_re
         # [num_pred, num_gt]
         pred_boxes_i = pred_boxes_np[pred_ind]
         pred_boxlabels_i = pred_boxlabels_np[pred_ind]
-
+        # ious, is_match are same size 2-d n by n matrix
         ious = bbox_overlaps(pred_boxes_i, gt_boxes_i)
         is_match = (pred_boxlabels_i[:,None] == gt_classes_i[None]) & (ious >= fg_thresh)
 
@@ -84,7 +84,7 @@ def rel_assignments(im_inds, rpn_rois, roi_gtlabels, gt_boxes, gt_classes, gt_re
         for i, (from_gtind, to_gtind, rel_id) in enumerate(gt_rels_i):
             fg_rels_i = []
             fg_scores_i = []
-
+            # find gt triplet in detected box
             for from_ind in np.where(is_match[:, from_gtind])[0]:
                 for to_ind in np.where(is_match[:, to_gtind])[0]:
                     if from_ind != to_ind:
@@ -93,15 +93,17 @@ def rel_assignments(im_inds, rpn_rois, roi_gtlabels, gt_boxes, gt_classes, gt_re
                         rel_possibilities[from_ind, to_ind] = 0
             if len(fg_rels_i) == 0:
                 continue
-            p = np.array(fg_scores_i)
+            p = np.array(fg_scores_i)  # list/array of gt triplet overall score
             p = p / p.sum()
             p_size.append(p.shape[0])
-            num_to_add = min(p.shape[0], num_sample_per_gt)
+            num_to_add = min(p.shape[0], num_sample_per_gt) # for each gt, only allow one trip-box to matched
+
             for rel_to_add in npr.choice(p.shape[0], p=p, size=num_to_add, replace=False):
                 fg_rels.append(fg_rels_i[rel_to_add])
+        
 
-        fg_rels = np.array(fg_rels, dtype=np.int64)
-        if fg_rels.size > 0 and fg_rels.shape[0] > fg_rels_per_image:
+        fg_rels = np.array(fg_rels, dtype=np.int64)  # gt relationship triplet
+        if fg_rels.size > 0 and fg_rels.shape[0] > fg_rels_per_image:  # fg_rels_per_image=64*0.25=16
             fg_rels = fg_rels[npr.choice(fg_rels.shape[0], size=fg_rels_per_image, replace=False)]
         elif fg_rels.size == 0:
             fg_rels = np.zeros((0, 3), dtype=np.int64)
@@ -131,8 +133,17 @@ def rel_assignments(im_inds, rpn_rois, roi_gtlabels, gt_boxes, gt_classes, gt_re
         # print("GTR {} -> AR {} vs {}".format(gt_rels.shape, fg_rels.shape, bg_rels.shape))
         all_rels_i = np.concatenate((fg_rels, bg_rels), 0)
         all_rels_i[:,0:2] += num_box_seen
+    
+        a = np.lexsort((all_rels_i[:,1], all_rels_i[:,0]))
+        if all_rels_i.shape[0] != np.max(a) + 1:
+            print("all_rels_i.shape[0] is ", all_rels_i.shape[0])
+            print("np.max(a) + 1 is ", np.max(a)+1 )
+            import ipdb
+            ipdb.set_trace()
 
-        all_rels_i = all_rels_i[np.lexsort((all_rels_i[:,1], all_rels_i[:,0]))]
+        # sort tuple/box inds pair
+        # all_rels_i: [box1_inds, box2_inds, rel_type] without sorting
+        all_rels_i = all_rels_i[a]
 
         rel_labels.append(np.column_stack((
             im_ind*np.ones(all_rels_i.shape[0], dtype=np.int64),

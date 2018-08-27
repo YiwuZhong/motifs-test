@@ -36,6 +36,7 @@ def extract_grad(grad):
     import ipdb
     ipdb.set_trace()
 
+
 def _sort_by_score(im_inds, scores):
     """
     We'll sort everything scorewise from Hi->low, BUT we need to keep images together
@@ -372,7 +373,7 @@ class RelModel(nn.Module):
         self.pooling_size = 7
         self.embed_dim = embed_dim
         self.hidden_dim = hidden_dim
-        self.obj_dim = 4096  # 2048 if use_resnet else 4096
+        self.obj_dim = 2048 if use_resnet else 4096
         self.pooling_dim = pooling_dim
 
         self.use_bias = use_bias
@@ -399,21 +400,14 @@ class RelModel(nn.Module):
 
         # Image Feats (You'll have to disable if you want to turn off the features from here)
         self.union_boxes = UnionBoxesAndFeats(pooling_size=self.pooling_size, stride=16,
-                                              dim=2048 if use_resnet else 512)
+                                              dim=1024 if use_resnet else 512)
 
         if use_resnet:
             self.roi_fmap = nn.Sequential(
                 resnet_l4(relu_end=False),
                 nn.AvgPool2d(self.pooling_size),
-                nn.Linear(4096, 2048),
-                Flattener()
+                Flattener(),
             )
-            self.roi_fmap_obj = nn.Sequential(
-                resnet_l4(relu_end=False),
-                nn.AvgPool2d(4),
-                nn.Linear(4096, 2048)
-            )
-
         else:
             roi_fmap = [
                 Flattener(),
@@ -445,7 +439,7 @@ class RelModel(nn.Module):
         
         # not too large; because in the same img, rel class is mostly 0; if too large, most neg rel is repeated
         self.neg_num = 1
-        self.use_resnet = use_resnet
+
 
         """
         self.embdim = 100 
@@ -526,11 +520,7 @@ class RelModel(nn.Module):
         """
         feature_pool = RoIAlignFunction(self.pooling_size, self.pooling_size, spatial_scale=1 / 16)(
             features, rois)
-        if self.use_resnet:
-            return self.roi_fmap_obj(feature_pool)
-        else:
-            return self.roi_fmap_obj(feature_pool.view(rois.size(0), -1))  # vgg.classifier
-
+        return self.roi_fmap_obj(feature_pool.view(rois.size(0), -1))  # vgg.classifier
     def new_obj_feature_map(self, features, rois):
         """
         Gets the ROI features
@@ -540,10 +530,7 @@ class RelModel(nn.Module):
         """
         feature_pool = RoIAlignFunction(self.pooling_size, self.pooling_size, spatial_scale=1 / 16)(
             features, rois)
-        if self.use_resnet:
-            return self.new_roi_fmap_obj(feature_pool)
-        else:
-            return self.new_roi_fmap_obj(feature_pool.view(rois.size(0), -1))  # vgg.classifier
+        return self.new_roi_fmap_obj(feature_pool.view(rois.size(0), -1))  # vgg.classifier
 
     def get_neg_examples(self, rel_labels):
         """
@@ -623,7 +610,7 @@ class RelModel(nn.Module):
             return ValueError("heck")
         im_inds = result.im_inds - image_offset
         # boxes: [#boxes, 4], without box deltas; where narrow error comes from, should .detach()
-        boxes = result.rm_box_priors    # .detach()   
+        boxes = result.rm_box_priors.detach()   
 
         if self.training and result.rel_labels is None:
             assert self.mode == 'sgdet' # sgcls's result.rel_labels is gt and not None
@@ -632,16 +619,17 @@ class RelModel(nn.Module):
                                                 gt_boxes.data, gt_classes.data, gt_rels.data,
                                                 image_offset, filter_non_overlap=True,
                                                 num_sample_per_gt=1)
+            rel_labels_neg = self.get_neg_examples(result.rel_labels)
+            rel_inds_neg = rel_labels_neg[:,:3]
 
-        #torch.cat((result.rel_labels[:,0].contiguous().view(rel_inds.size(0),1),result.rm_obj_labels[result.rel_labels[:,1]].view(rel_inds.size(0),1),result.rm_obj_labels[result.rel_labels[:,2]].view(rel_inds.size(0),1),result.rel_labels[:,3].contiguous().view(rel_inds.size(0),1)),-1)
-        #bbox_overlaps(boxes.data[55:57].contiguous().view(-1,1), boxes.data[8].contiguous().view(-1,1))
+        #torch.cat((result.rel_labels[:,0].contiguous().view(236,1),result.rm_obj_labels[result.rel_labels[:,1]].view(236,1),result.rm_obj_labels[result.rel_labels[:,2]].view(236,1),result.rel_labels[:,3].contiguous().view(236,1)),-1)
         rel_inds = self.get_rel_inds(result.rel_labels, im_inds, boxes)  #[275,3], [im_inds, box1_inds, box2_inds]
-        
+
         # rois: [#boxes, 5]
         rois = torch.cat((im_inds[:, None].float(), boxes), 1)
         # result.rm_obj_fmap: [384, 4096]
         #result.rm_obj_fmap = self.obj_feature_map(result.fmap.detach(), rois) # detach: prevent backforward flowing
-        result.rm_obj_fmap = self.obj_feature_map(result.fmap.detach(), rois) # detach: prevent backforward flowing
+        result.rm_obj_fmap = self.obj_feature_map(result.fmap.detach(), rois.detach()) # detach: prevent backforward flowing
 
         # BiLSTM
         result.rm_obj_dists, result.rm_obj_preds, edge_ctx = self.context(
@@ -649,7 +637,7 @@ class RelModel(nn.Module):
             # rm_obj_dists: [#boxes, 151]; Prevent gradients from flowing back into score_fc from elsewhere
             result.rm_obj_dists.detach(),  # .detach:Returns a new Variable, detached from the current graph
             im_inds, result.rm_obj_labels if self.training or self.mode == 'predcls' else None,
-            boxes.data, result.boxes_all if self.mode == 'sgdet' else result.boxes_all)
+            boxes.data, result.boxes_all.detach() if self.mode == 'sgdet' else result.boxes_all)
         
 
         # Post Processing
@@ -676,7 +664,11 @@ class RelModel(nn.Module):
                 prod_rep = torch.cat((prod_rep[:,:2048] * vr[:,:2048], prod_rep[:,2048:]), 1) 
             else:
                 prod_rep = prod_rep * vr  # [275,4096]
-
+                if self.training:
+                    vr_neg = self.visual_rep(result.fmap.detach(), rois, rel_inds_neg[:, 1:])
+                    prod_rep_neg = subj_rep[rel_inds_neg[:, 1]].detach() * obj_rep[rel_inds_neg[:, 2]].detach() * vr_neg 
+                    rel_dists_neg = self.rel_compress(prod_rep_neg)
+                    
 
         if self.use_tanh:  # False when sgdet
             prod_rep = F.tanh(prod_rep)
@@ -689,95 +681,61 @@ class RelModel(nn.Module):
                 result.rm_obj_preds[rel_inds[:, 2]],
             ), 1))
 
-        # Attention: pos should use rm_obj_labes/rel_labels for obj/rel scores; neg should use rm_obj_preds/max_rel_score for obj/rel scores
-        if self.training: 
+
+        if self.training:
             judge = result.rel_labels.data[:,3] != 0
             if judge.sum() != 0:  # gt_rel exit in rel_inds
-                # positive overall score
                 select_rel_inds = torch.arange(rel_inds.size(0)).view(-1,1).long().cuda()[result.rel_labels.data[:,3] != 0]
                 com_rel_inds = rel_inds[select_rel_inds]
-                twod_inds = arange(result.rm_obj_labels.data) * self.num_classes + result.rm_obj_labels.data  # dist: [-10,10]
-                result.obj_scores = F.softmax(result.rm_obj_dists, dim=1).view(-1)[twod_inds]   # only 1/4 of 384 obj_dists will be updated; because only 1/4 objs's labels are not 0
-              
+                twod_inds = arange(result.rm_obj_preds.data) * self.num_classes + result.rm_obj_preds.data
+                result.obj_scores = F.softmax(result.rm_obj_dists.detach(), dim=1).view(-1)[twod_inds]   # only 1/4 of 384 obj_dists will be updated; because only 1/4 objs's labels are not 0
+
+                # positive overall score
                 obj_scores0 = result.obj_scores[com_rel_inds[:,1]]
                 obj_scores1 = result.obj_scores[com_rel_inds[:,2]]
                 rel_rep = F.softmax(result.rel_dists[select_rel_inds], dim=1)    # result.rel_dists has grad
-                rel_score = rel_rep.gather(1, result.rel_labels[select_rel_inds][:,3].contiguous().view(-1,1)).view(-1)  # not use squeeze(); SqueezeBackward, GatherBackward
-                prob_score = rel_score * obj_scores0 * obj_scores1
-
+                _, pred_classes_argmax = rel_rep.data[:,:].max(1)  # all classes
+                max_rel_score = rel_rep.gather(1, Variable(pred_classes_argmax.view(-1,1))).squeeze()  # SqueezeBackward, GatherBackward
+                score_list = torch.cat((com_rel_inds[:,0].float().contiguous().view(-1,1), obj_scores0.data.view(-1,1), obj_scores1.data.view(-1,1), max_rel_score.data.view(-1,1)), 1)
+                prob_score = max_rel_score * obj_scores0.detach() * obj_scores1.detach()
+                #pos_prob[:,1][result.rel_labels.data[:,3] == 0] = 0  # treat most rel_labels as neg because their rel cls is 0 "unknown"  
+                
                 # negative overall score
-                rel_cands = im_inds.data[:, None] == im_inds.data[None]
-                rel_cands.view(-1)[diagonal_inds(rel_cands)] = 0   # self relation = 0
-                if self.require_overlap:     
-                    rel_cands = rel_cands & (bbox_overlaps(boxes.data, boxes.data) > 0)   # Require overlap for detection
-                rel_cands = rel_cands.nonzero()  # [#, 2]
-                if rel_cands.dim() == 0:
-                    print("rel_cands.dim() == 0!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                    rel_cands = im_inds.data.new(1, 2).fill_(0) # shaped: [1,2], [0, 0]
-                rel_cands = torch.cat((im_inds.data[rel_cands[:, 0]][:, None], rel_cands), 1) # rel_cands' value should be [0, 384]
-                rel_inds_neg = rel_cands
-
-                vr_neg = self.visual_rep(result.fmap.detach(), rois, rel_inds_neg[:, 1:])
-                subj_obj = subj_rep[rel_inds_neg[:, 1]] * obj_rep[rel_inds_neg[:, 2]]
-                prod_rep_neg =  subj_obj * vr_neg
-                rel_dists_neg = self.rel_compress(prod_rep_neg)
-                all_rel_rep_neg = F.softmax(rel_dists_neg, dim=1)
-                _, pred_classes_argmax_neg = all_rel_rep_neg.data[:,1:].max(1)
-                pred_classes_argmax_neg = pred_classes_argmax_neg + 1
-                all_rel_pred_neg = torch.cat((rel_inds_neg, pred_classes_argmax_neg.view(-1,1)), 1)
-                ind_old = torch.ones(all_rel_pred_neg.size(0)).byte().cuda()
-                for i in range(com_rel_inds.size(0)):    # delete those box pair with same rel type as pos triplets
-                    ind_i = (all_rel_pred_neg[:,0] == com_rel_inds[i, 0]) & (all_rel_pred_neg[:,1] == com_rel_inds[i, 1]) & (result.rm_obj_preds.data[all_rel_pred_neg[:,1]] == result.rm_obj_labels.data[com_rel_inds[i, 1]]) & (all_rel_pred_neg[:,2] == com_rel_inds[i, 2]) & (result.rm_obj_preds.data[all_rel_pred_neg[:,2]] == result.rm_obj_labels.data[com_rel_inds[i, 2]]) & (all_rel_pred_neg[:,3] == result.rel_labels.data[select_rel_inds][i,3]) 
-                    ind_i = (1 - ind_i).byte()
-                    ind_old = ind_i & ind_old
-
-                rel_inds_neg = rel_inds_neg.masked_select(ind_old.view(-1,1).expand(-1,3) == 1).view(-1,3)
-                rel_rep_neg = all_rel_rep_neg.masked_select(Variable(ind_old.view(-1,1).expand(-1,51)) == 1).view(-1,51)
-                pred_classes_argmax_neg = pred_classes_argmax_neg.view(-1,1)[ind_old.view(-1,1) == 1]
-                rel_labels_pred_neg = all_rel_pred_neg.masked_select(ind_old.view(-1,1).expand(-1,4) == 1).view(-1,4)
-
-                max_rel_score_neg = rel_rep_neg.gather(1, Variable(pred_classes_argmax_neg.view(-1,1))).view(-1)  # not use squeeze()
-                twod_inds_neg = arange(result.rm_obj_preds.data) * self.num_classes + result.rm_obj_preds.data
-                obj_scores_neg = F.softmax(result.rm_obj_dists, dim=1).view(-1)[twod_inds_neg] 
-                obj_scores0_neg = Variable(obj_scores_neg.data[rel_inds_neg[:,1]])
-                obj_scores1_neg = Variable(obj_scores_neg.data[rel_inds_neg[:,2]])
-                all_score_neg = max_rel_score_neg * obj_scores0_neg * obj_scores1_neg
-                # delete those triplet whose score is lower than pos triplets
-                prob_score_neg = all_score_neg[all_score_neg.data > prob_score.data.min()] if (all_score_neg.data > prob_score.data.min()).sum() != 0 else all_score_neg
-
+                obj_scores0_neg = result.obj_scores[rel_inds_neg[:,1]]
+                obj_scores1_neg = result.obj_scores[rel_inds_neg[:,2]]
+                rel_rep_neg = F.softmax(rel_dists_neg, dim=1)   # rel_dists_neg has grad
+                _, pred_classes_argmax_neg = rel_rep_neg.data[:,:].max(1)  # all classes
+                max_rel_score_neg = rel_rep_neg.gather(1, Variable(pred_classes_argmax_neg.view(-1,1))).squeeze() # SqueezeBackward, GatherBackward
+                score_list_neg = torch.cat((rel_inds_neg[:,0].float().contiguous().view(-1,1), obj_scores0_neg.data.view(-1,1), obj_scores1_neg.data.view(-1,1), max_rel_score_neg.data.view(-1,1)), 1)
+                prob_score_neg = max_rel_score_neg * obj_scores0_neg.detach() * obj_scores1_neg.detach()
 
                 # use all rel_inds, already irrelavant with im_inds, which is only use to extract region from img and produce rel_inds
                 # 384 boxes---(rel_inds)(rel_inds_neg)--->prob_score,prob_score_neg 
+                all_rel_inds = torch.cat((result.rel_labels.data[select_rel_inds], rel_labels_neg), 0)  # [#pos_inds+#neg_inds, 4]
                 flag = torch.cat((torch.ones(prob_score.size(0),1).cuda(),torch.zeros(prob_score_neg.size(0),1).cuda()),0)
+                score_list_all = torch.cat((score_list,score_list_neg), 0) 
                 all_prob = torch.cat((prob_score,prob_score_neg), 0)  # Variable, [#pos_inds+#neg_inds, 1]
 
                 _, sort_prob_inds = torch.sort(all_prob.data, dim=0, descending=True)
 
-                sorted_flag = flag[sort_prob_inds].view(-1)  # can be used to check distribution of pos and neg
+                sorted_rel_inds = all_rel_inds[sort_prob_inds]
+                sorted_flag = flag[sort_prob_inds].squeeze()  # can be used to check distribution of pos and neg
+                sorted_score_list_all = score_list_all[sort_prob_inds]
                 sorted_all_prob = all_prob[sort_prob_inds]  # Variable
                 
-                # positive triplet score
+                # positive triplet and score list
+                pos_sorted_inds = sorted_rel_inds.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 1).view(-1,4)
+                pos_trips = torch.cat((pos_sorted_inds[:,0].contiguous().view(-1,1), result.rm_obj_labels.data.view(-1,1)[pos_sorted_inds[:,1]], result.rm_obj_labels.data.view(-1,1)[pos_sorted_inds[:,2]], pos_sorted_inds[:,3].contiguous().view(-1,1)), 1)
+                pos_score_list = sorted_score_list_all.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 1).view(-1,4)
                 pos_exp = sorted_all_prob[sorted_flag == 1]  # Variable 
-                # negative triplet score
+
+                # negative triplet and score list
+                neg_sorted_inds = sorted_rel_inds.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 0).view(-1,4)
+                neg_trips = torch.cat((neg_sorted_inds[:,0].contiguous().view(-1,1), result.rm_obj_labels.data.view(-1,1)[neg_sorted_inds[:,1]], result.rm_obj_labels.data.view(-1,1)[neg_sorted_inds[:,2]], neg_sorted_inds[:,3].contiguous().view(-1,1)), 1)
+                neg_score_list = sorted_score_list_all.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 0).view(-1,4)
                 neg_exp = sorted_all_prob[sorted_flag == 0]  # Variable
-
-                # determine how many rows will be updated in rel_dists_neg
-                pos_repeat = torch.zeros(1, 1)
-                neg_repeat = torch.zeros(1, 1)
-                for i in range(pos_exp.size(0)):
-                    if ( neg_exp.data > pos_exp.data[i] ).sum() != 0:
-                        int_part = (neg_exp.data > pos_exp.data[i]).sum()
-                        temp_pos_inds = torch.ones(int_part) * i
-                        pos_repeat =  torch.cat((pos_repeat, temp_pos_inds.view(-1,1)), 0)
-                        temp_neg_inds = torch.arange(int_part)
-                        neg_repeat = torch.cat((neg_repeat, temp_neg_inds.view(-1,1)), 0)
-                    else:
-                        temp_pos_inds = torch.ones(1)* i
-                        pos_repeat =  torch.cat((pos_repeat, temp_pos_inds.view(-1,1)), 0)
-                        temp_neg_inds = torch.arange(1)
-                        neg_repeat = torch.cat((neg_repeat, temp_neg_inds.view(-1,1)), 0)
-
-                """
+                
+                
                 int_part = neg_exp.size(0) // pos_exp.size(0)
                 decimal_part = neg_exp.size(0) % pos_exp.size(0)
                 int_inds = torch.arange(pos_exp.size(0))[:,None].expand_as(torch.Tensor(pos_exp.size(0), int_part)).contiguous().view(-1)
@@ -790,58 +748,61 @@ class RelModel(nn.Module):
                 result.pos = pos_exp[expand_inds]
                 result.neg = neg_exp
                 result.anchor = Variable(torch.zeros(result.pos.size(0)).cuda())
-                """
-                result.pos = pos_exp[pos_repeat.cuda().long().view(-1)]
-                result.neg = neg_exp[neg_repeat.cuda().long().view(-1)]
-                result.anchor = Variable(torch.zeros(result.pos.size(0)).cuda())
-                
-
-                result.ratio = torch.ones(3).cuda()
-                result.ratio[0] = result.ratio[0] * (sorted_flag.nonzero().min() / (prob_score.size(0) + all_score_neg.size(0)))
-                result.ratio[1] = result.ratio[1] * (sorted_flag.nonzero().max() / (prob_score.size(0) + all_score_neg.size(0)))
-                result.ratio[2] = result.ratio[2] * (prob_score.size(0) + all_score_neg.size(0))
+                # some variables .register_hook(extract_grad)
 
                 return result
 
             else:  # no gt_rel in rel_inds
                 print("no gt_rel in rel_inds!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                ipdb.set_trace()
-                # testing triplet proposal
-                rel_cands = im_inds.data[:, None] == im_inds.data[None]
-                # self relation = 0
-                rel_cands.view(-1)[diagonal_inds(rel_cands)] = 0
-                # Require overlap for detection
-                if self.require_overlap:
-                    rel_cands = rel_cands & (bbox_overlaps(boxes.data, boxes.data) > 0)
-                rel_cands = rel_cands.nonzero()
-                if rel_cands.dim() == 0:
-                    print("rel_cands.dim() == 0!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                    rel_cands = im_inds.data.new(1, 2).fill_(0)
-                rel_cands = torch.cat((im_inds.data[rel_cands[:, 0]][:, None], rel_cands), 1)
-                rel_labels_neg = rel_cands
-                rel_inds_neg = rel_cands
+                twod_inds = arange(result.rm_obj_preds.data) * self.num_classes + result.rm_obj_preds.data
+                result.obj_scores = F.softmax(result.rm_obj_dists.detach(), dim=1).view(-1)[twod_inds]
 
-                twod_inds_neg = arange(result.rm_obj_preds.data) * self.num_classes + result.rm_obj_preds.data
-                obj_scores_neg = F.softmax(result.rm_obj_dists, dim=1).view(-1)[twod_inds_neg]
-                vr_neg = self.visual_rep(result.fmap.detach(), rois, rel_inds_neg[:, 1:])
-                subj_obj = subj_rep[rel_inds_neg[:, 1]] * obj_rep[rel_inds_neg[:, 2]]
-                prod_rep_neg = subj_obj * vr_neg
-                rel_dists_neg = self.rel_compress(prod_rep_neg)
+                # positive overall score
+                obj_scores0 = result.obj_scores[rel_inds[:,1]]
+                obj_scores1 = result.obj_scores[rel_inds[:,2]]
+                rel_rep = F.softmax(result.rel_dists, dim=1)    # [275, 51]
+                _, pred_classes_argmax = rel_rep.data[:,:].max(1)  # all classes
+                max_rel_score = rel_rep.gather(1, Variable(pred_classes_argmax.view(-1,1))).squeeze() # SqueezeBackward, GatherBackward
+                prob_score = max_rel_score * obj_scores0.detach() * obj_scores1.detach()
+                #pos_prob[:,1][result.rel_labels.data[:,3] == 0] = 0  # treat most rel_labels as neg because their rel cls is 0 "unknown"  
+                
                 # negative overall score
-                obj_scores0_neg = Variable(obj_scores_neg.data[rel_inds_neg[:,1]])
-                obj_scores1_neg = Variable(obj_scores_neg.data[rel_inds_neg[:,2]])
-                rel_rep_neg = F.softmax(rel_dists_neg, dim=1)
-                _, pred_classes_argmax_neg = rel_rep_neg.data[:,1:].max(1)
-                pred_classes_argmax_neg = pred_classes_argmax_neg + 1
+                obj_scores0_neg = result.obj_scores[rel_inds_neg[:,1]]
+                obj_scores1_neg = result.obj_scores[rel_inds_neg[:,2]]
+                rel_rep_neg = F.softmax(rel_dists_neg, dim=1)   
+                _, pred_classes_argmax_neg = rel_rep_neg.data[:,:].max(1)  # all classes
+                max_rel_score_neg = rel_rep_neg.gather(1, Variable(pred_classes_argmax_neg.view(-1,1))).squeeze() # SqueezeBackward, GatherBackward
+                prob_score_neg = max_rel_score_neg * obj_scores0_neg.detach() * obj_scores1_neg.detach()
 
-                max_rel_score_neg = rel_rep_neg.gather(1, Variable(pred_classes_argmax_neg.view(-1,1))).view(-1)  # not use squeeze()
-                prob_score_neg = max_rel_score_neg * obj_scores0_neg * obj_scores1_neg
+                # use all rel_inds, already irrelavant with im_inds, which is only use to extract region from img and produce rel_inds
+                # 384 boxes---(rel_inds)(rel_inds_neg)--->prob_score,prob_score_neg 
+                all_rel_inds = torch.cat((result.rel_labels.data, rel_labels_neg), 0)  # [#pos_inds+#neg_inds, 4]
+                flag = torch.cat((torch.ones(prob_score.size(0),1).cuda(),torch.zeros(prob_score_neg.size(0),1).cuda()),0)
+                all_prob = torch.cat((prob_score,prob_score_neg), 0)  # Variable, [#pos_inds+#neg_inds, 1]
 
-                result.pos = Variable(torch.zeros(prob_score_neg.size(0)).cuda())
-                result.neg = prob_score_neg
-                result.anchor = Variable(torch.zeros(prob_score_neg.size(0)).cuda())
+                _, sort_prob_inds = torch.sort(all_prob.data, dim=0, descending=True)
 
-                result.ratio = torch.ones(3,1).cuda()
+                sorted_rel_inds = all_rel_inds[sort_prob_inds]
+                sorted_flag = flag[sort_prob_inds].squeeze()  # can be used to check distribution of pos and neg
+                sorted_all_prob = all_prob[sort_prob_inds]  # Variable
+
+                pos_sorted_inds = sorted_rel_inds.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 1).view(-1,4)
+                neg_sorted_inds = sorted_rel_inds.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 0).view(-1,4)
+                pos_exp = sorted_all_prob[sorted_flag == 1]  # Variable  
+                neg_exp = sorted_all_prob[sorted_flag == 0]  # Variable
+
+                int_part = neg_exp.size(0) // pos_exp.size(0)
+                decimal_part = neg_exp.size(0) % pos_exp.size(0)
+                int_inds = torch.arange(pos_exp.data.size(0))[:,None].expand_as(torch.Tensor(pos_exp.data.size(0), int_part)).contiguous().view(-1)
+                int_part_inds = (int(pos_exp.data.size(0) -1) - int_inds).long().cuda() # use minimum pos to correspond maximum negative
+                if decimal_part == 0:
+                    expand_inds = int_part_inds
+                else:
+                    expand_inds = torch.cat((torch.arange(pos_exp.size(0))[(pos_exp.size(0) - decimal_part):].long().cuda(), int_part_inds), 0)  
+                
+                result.pos = pos_exp[expand_inds]
+                result.neg = neg_exp
+                result.anchor = Variable(torch.zeros(result.pos.size(0)).cuda())
 
                 return result
         ###################### Testing ###########################
@@ -878,83 +839,49 @@ class RelModel(nn.Module):
             return gather_res(outputs, 0, dim=0)
         return outputs
 
-
 """# write data into txt
+# write data into txt
+dirname = '/home/yiwuzhong/motifs/'
+pathname = os.path.join(dirname)
 
-                score_list = torch.cat((com_rel_inds[:,0].float().contiguous().view(-1,1), obj_scores0.data.view(-1,1), obj_scores1.data.view(-1,1), rel_score.data.view(-1,1)), 1)
-                score_list_neg = torch.cat((rel_inds_neg[:,0].float().contiguous().view(-1,1), obj_scores0_neg.data.view(-1,1), obj_scores1_neg.data.view(-1,1), max_rel_score_neg.data.view(-1,1)), 1)
+with open(os.path.join(pathname, 'triplet.txt'), 'a') as g:
+    p = pos_trips.cpu().numpy()
+    pp = pos_exp.data.cpu().numpy()
+    ppp = pos_score_list.cpu().numpy()
+    pppp = pos_sorted_inds.cpu().numpy()
+    pn = neg_trips.cpu().numpy()
+    ppn = neg_exp.data.cpu().numpy()
+    pppn = neg_score_list.cpu().numpy()
+    ppppn = neg_sorted_inds.cpu().numpy()
+    g.write('\n \n Positive triplets:')
+    for i in range(pos_trips.size(0)):
+        g.write("\n pos_box_inds: ")
+        g.write(np.array2string(pppp[i, 1:],  formatter={'float_kind':lambda x: "%.4f" % x}))
+        g.write("--")
+        obj1_str = self.classes[p[i, 1]]
+        obj2_str = self.classes[p[i, 2]]
+        rel_str = self.rel_classes[p[i, 3]]
+        g.write(' {} - {} - {}'.format(obj1_str, obj2_str, rel_str))
+    for i in range(pos_trips.size(0)):
+        g.write("\n pos_score_list:")
+        g.write(np.array2string(ppp[i, 1:],  formatter={'float_kind':lambda x: "%.4f" % x}))
+        g.write("--")
+        g.write(np.array2string(pp[i],  formatter={'float_kind':lambda x: "%.4f" % x}))
+    g.write("\n \nPositive examples (" + str(pos_trips.size(0)) +  ") distribution among all examples (" + str(sorted_flag.size(0)) + ")")
+    g.write("\n")
+    g.write(np.array2string(torch.arange(sorted_flag.size(0)).cuda()[sorted_flag == 1].cpu().numpy(),  formatter={'float_kind':lambda x: "%.0f" % x}))
+    g.write('\n \n Negative triplets:')
+    for i in range(20):
+        g.write("\n neg_box_inds: ")
+        g.write(np.array2string(ppppn[i, 1:],  formatter={'float_kind':lambda x: "%.4f" % x}))
+        obj1_str = self.classes[pn[i, 1]]
+        obj2_str = self.classes[pn[i, 2]]
+        rel_str = self.rel_classes[pn[i, 3]]
+        g.write(' {} - {} - {}'.format(obj1_str, obj2_str, rel_str))
+    for i in range(20):
+        g.write("\n neg_score_list:")
+        g.write(np.array2string(pppn[i, 1:],  formatter={'float_kind':lambda x: "%.4f" % x}))
+        g.write("--")
+        g.write(np.array2string(ppn[i],  formatter={'float_kind':lambda x: "%.4f" % x}))
 
-                all_rel_inds = torch.cat((result.rel_labels.data[select_rel_inds], rel_labels_pred_neg), 0)  # [#pos_inds+#neg_inds, 4]
-                score_list_all = torch.cat((score_list,score_list_neg), 0) 
-
-                sorted_rel_inds = all_rel_inds[sort_prob_inds]
-                sorted_score_list_all = score_list_all[sort_prob_inds]
-
-                pos_sorted_inds = sorted_rel_inds.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 1).view(-1,4)
-                pos_trips = torch.cat((pos_sorted_inds[:,0].contiguous().view(-1,1), result.rm_obj_labels.data.view(-1,1)[pos_sorted_inds[:,1]], result.rm_obj_labels.data.view(-1,1)[pos_sorted_inds[:,2]], pos_sorted_inds[:,3].contiguous().view(-1,1)), 1)
-                pos_score_list = sorted_score_list_all.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 1).view(-1,4)
-
-                neg_sorted_inds = sorted_rel_inds.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 0).view(-1,4)
-                neg_trips = torch.cat((neg_sorted_inds[:,0].contiguous().view(-1,1), result.rm_obj_preds.data.view(-1,1)[neg_sorted_inds[:,1]], result.rm_obj_preds.data.view(-1,1)[neg_sorted_inds[:,2]], neg_sorted_inds[:,3].contiguous().view(-1,1)), 1)
-                neg_score_list = sorted_score_list_all.masked_select(sorted_flag.view(-1,1).expand(-1,4).cuda() == 0).view(-1,4)
-
-                dirname = '/home/yiwuzhong/motifs/'
-                pathname = os.path.join(dirname)
-
-                with open(os.path.join(pathname, 'triplet.txt'), 'a') as g:
-                    p = pos_trips.cpu().numpy()
-                    pp = pos_exp.data.cpu().numpy()
-                    ppp = pos_score_list.cpu().numpy()
-                    pppp = pos_sorted_inds.cpu().numpy()
-                    pn = neg_trips.cpu().numpy()
-                    ppn = neg_exp.data.cpu().numpy()
-                    pppn = neg_score_list.cpu().numpy()
-                    ppppn = neg_sorted_inds.cpu().numpy()
-                    g.write('\n \n Positive triplets:')
-                    for i in range(pos_trips.size(0)):
-                        g.write("\n ")
-                        g.write(np.array2string(pppp[i, 1:],  formatter={'float_kind':lambda x: "%.4f" % x}))
-                        g.write(" | ")
-                        g.write(np.array2string(ppp[i, 1:],  formatter={'float_kind':lambda x: "%.4f" % x}))
-                        g.write(" | ")
-                        g.write(np.array2string(pp[i],  formatter={'float_kind':lambda x: "%.4f" % x}))
-                        g.write(" | ")
-                        obj1_str = self.classes[p[i, 1]]
-                        obj2_str = self.classes[p[i, 2]]
-                        rel_str = self.rel_classes[p[i, 3]]
-                        g.write(' {} - {} - {}'.format(obj1_str, obj2_str, rel_str))
-                    g.write("\n \nPositive examples (" + str(pos_trips.size(0)) +  ") distribution among all examples (" + str(sorted_flag.size(0)) + ")")
-                    g.write("\n")
-                    g.write(np.array2string((torch.arange(sorted_flag.size(0)).cuda()[sorted_flag == 1] + 1).cpu().numpy(),  formatter={'float_kind':lambda x: "%.0f" % x}))
-                    g.write('\n \n Negative triplets:')
-                    for i in range(min(20, pn.shape[0])):
-                        g.write("\n ")
-                        g.write(np.array2string(ppppn[i, 1:],  formatter={'float_kind':lambda x: "%.4f" % x}))
-                        g.write(" | ")
-                        g.write(np.array2string(pppn[i, 1:],  formatter={'float_kind':lambda x: "%.4f" % x}))
-                        g.write(" | ")
-                        g.write(np.array2string(ppn[i],  formatter={'float_kind':lambda x: "%.4f" % x}))
-                        g.write(" | ")
-                        obj1_str = self.classes[pn[i, 1]]
-                        obj2_str = self.classes[pn[i, 2]]
-                        rel_str = self.rel_classes[pn[i, 3]]
-                        g.write(' {} - {} - {}'.format(obj1_str, obj2_str, rel_str))
-"""
-
-"""
-# check gradients
-                rel_dists_neg.register_hook(extract_grad)
-                all_rel_rep_neg.register_hook(extract_grad)
-                rel_rep_neg.register_hook(extract_grad)
-                all_score_neg.register_hook(extract_grad)
-                result.neg.register_hook(extract_grad)
-                print("Size of pos_exp is: ", pos_exp.size(0))
-                print("Size of neg_exp is: ", neg_exp.size(0))
-                print("result.rel_dists max is: ",result.rel_dists.data[:,3].max()) # [-3, 3]
-                print("result.rel_dists min is: ",result.rel_dists.data[:,3].min()) # [-3, 3]               
-                print("result.rel_dists max is: ",result.rel_dists.data[:,10].max())  # [-5, 5]
-                print("result.rel_dists min is: ",result.rel_dists.data[:,10].min())  # [-5, 5]
-                print(com_rel_inds)
-                print("Size of rel_cands is", rel_cands.size(0))
-                print("Size of final rel_inds_neg is", rel_inds_neg.size(0))
 """

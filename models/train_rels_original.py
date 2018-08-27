@@ -78,8 +78,8 @@ if conf.ckpt.split('-')[-2].split('/')[-1] == 'vgrel':
     start_epoch = ckpt['epoch']
 
     if not optimistic_restore(detector, ckpt['state_dict']):
-        start_epoch = -1
-        # optimistic_restore(detector.detector, torch.load('checkpoints/vgdet/vg-28.tar')['state_dict'])
+        pass
+        #optimistic_restore(detector.detector, torch.load('/home/yiwuzhong/motifs/checkpoints/downloaded_ckpt/vg-72.tar')['state_dict'])
 else:
     start_epoch = -1
     optimistic_restore(detector.detector, ckpt['state_dict'])
